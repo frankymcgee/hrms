@@ -70,6 +70,12 @@
 					label="Status"
 					v-model="form.status"
 				/>
+				<!-- Notes -->
+				<FormControl
+					type="textarea"
+					label="Note"
+					v-model="form.note"
+				/>
 			</div>
 
 			<!-- Schedule Settings -->
@@ -170,6 +176,7 @@ type Form = {
 		| "employee"
 		| "shift_type"
 		| "shift_location"
+		| "note"
 		| "custom_project"]: Selectish;
 } & {
 	start_date: string;
@@ -196,6 +203,7 @@ const formObject: Form = {
 	shift_type: "",
 	start_date: "",
 	shift_location: "",
+	note: "",
 	end_date: "",
 	status: "Active",
 	shift_schedule_assignment: "",
@@ -226,6 +234,7 @@ const dialog = computed(() => {
 		const unchanged =
 			form.status === shiftAssignment.value?.doc?.status &&
 			form.end_date === shiftAssignment.value?.doc?.end_date &&
+			form.note === shiftAssignment.value?.doc?.note &&
 			getId(form.custom_project) === shiftAssignment.value?.doc?.custom_project;
 
 		return {
@@ -345,6 +354,7 @@ const updateShiftAssigment = () => {
 	shiftAssignment.value.setValue.submit({
 		status: form.status,
 		end_date: form.end_date,
+		note: form.note,
 		custom_project: getId(form.custom_project),
 	});
 };
@@ -440,7 +450,7 @@ const projects = createListResource({
 	fields: ["name", "project_name"],
 	filters: [["status", "=", "Open"]],
 	orderBy: 'project_name asc',
-	limit: 200, // ask for more than default
+	pageLength: 200, // ask for more than default
 	auto: true,
 });
 const projectOptions = computed(() =>
@@ -483,6 +493,7 @@ const insertShift = createResource({
 			status: form.status,
 			start_date: form.start_date,
 			end_date: form.end_date,
+			note: form.note,
 			custom_project: getId(form.custom_project),
 		};
 	},
@@ -517,6 +528,7 @@ const createShiftAssignmentSchedule = createResource({
 			status: form.status,
 			start_date: form.start_date,
 			end_date: form.end_date,
+			note: form.note,
 			shift_location: getId(form.shift_location),
 			repeat_on_days: Object.keys(repeatOnDays).filter((d) => repeatOnDays[d as keyof typeof repeatOnDays]),
 			frequency: frequency.value,

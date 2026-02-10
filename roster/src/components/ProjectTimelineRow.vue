@@ -298,7 +298,7 @@ const projectList = createListResource({
     return base
   }),
   order_by: 'expected_start_date asc',
-  page_length: 1000,
+  pageLength: 1000,
   auto: false,
   onSuccess() {
     loading.value = false

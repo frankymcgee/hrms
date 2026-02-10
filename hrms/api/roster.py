@@ -1,6 +1,6 @@
 import frappe
 from frappe import _
-from frappe.utils import add_days, date_diff
+from frappe.utils import add_days, date_diff, getdate, get_datetime_str
 
 from erpnext.setup.doctype.employee.employee import get_holiday_list_for_employee
 
@@ -133,6 +133,12 @@ def swap_shift(
 			tgt_shift_doc.custom_project,
 		)
 
+@frappe.whitelist()
+def _to_date_str(value):
+	if not value:
+		return None
+	# getdate handles str/date/datetime; str() gives YYYY-MM-DD for date
+	return str(getdate(value))
 
 @frappe.whitelist()
 def break_shift(assignment: str | ShiftAssignment, date: str) -> None:
@@ -161,7 +167,7 @@ def break_shift(assignment: str | ShiftAssignment, date: str) -> None:
 
 	if not end_date or date_diff(end_date, date) > 0:
 		create_shift_assignment(
-			employee, company, shift_type, add_days(date, 1), end_date, status, custom_project, shift_location
+			employee, company, shift_type, _to_date_str(add_days(date, 1)), _to_date_str(end_date), status, custom_project, shift_location
 		)
 
 
@@ -287,6 +293,7 @@ def get_shifts(
 			ShiftAssignment.status,
 			ShiftAssignment.shift_schedule_assignment,
 			ShiftAssignment.custom_project_name,
+			ShiftAssignment.note,
 			ShiftType.start_time,
 			ShiftType.end_time,
 			ShiftType.color,

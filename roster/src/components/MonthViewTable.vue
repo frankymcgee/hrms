@@ -176,11 +176,7 @@
 										'opacity-0',
 								]"
 								:style="{
-									borderColor:
-										hoveredCell.shift === shift.name &&
-										hoveredCell.date === day.date
-											? colors[shift.color as Color][300]
-											: colors[shift.color as Color][200],
+									borderColor: shiftBorderColor(shift, day.date),
 									backgroundColor:
 										shift.status === 'Active'
 											? colors[shift.color as Color][50]
@@ -301,8 +297,9 @@ type Color =
 	| "yellow";
 
 type Shift = {
-	[K in "name" | "shift_type" | "status" | "start_time" | "end_time" | "shift_location" | "custom_project_name"]: string;
+	[K in "name" | "shift_type" | "status" | "start_time" | "end_time" | "shift_location" | "custom_project_name" | "note"]: string;
 } & {
+	note: string | null;
 	color: Color;
 };
 
@@ -316,6 +313,18 @@ type MappedEvents = Record<string, Record<string, Holiday | Leave | Shift[]>>;
 
 const emit = defineEmits<{ (e: 'hscroll', left: number): void }>()
 const scroller = ref<HTMLDivElement | null>(null)
+
+const hasNote = (note: string | null | undefined) =>
+	typeof note === "string" && note.trim().length > 0;
+
+
+const shiftBorderColor = (shift: Shift, dayDate: string) => {
+	if (hasNote(shift.note)) return colors.red[500];
+	return hoveredCell.value.shift === shift.name && hoveredCell.value.date === dayDate
+		? colors[shift.color][300]
+		: colors[shift.color][200];
+};
+
 
 function onHScroll() {
   if (scroller.value) emit('hscroll', scroller.value.scrollLeft)
@@ -387,6 +396,7 @@ const hasSameShift = (employee: string, day: string) =>
 			shift.shift_type === hoveredCell.value.shift_type &&
 			shift.shift_location === hoveredCell.value.shift_location &&
 			shift.status === hoveredCell.value.shift_status,
+			
 	);
 
 // RESOURCES
@@ -504,6 +514,7 @@ const handleShifts = (
 			end_time: dayjs(event.end_time, "hh:mm:ss").format("HH:mm"),
 			color: event.color.toLowerCase() as Color,
 			custom_project_name: event.custom_project_name,
+			note: event.note,
 		});
 	}
 };
