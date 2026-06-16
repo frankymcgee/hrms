@@ -1,12 +1,12 @@
 <template>
   <div class="flex items-center">
-    <!-- Month Change -->
+    <!-- Period Change -->
     <div class="flex items-center bg-gray-50 rounded-md space-x-0.5">
-      <Button icon="chevron-left" variant="ghost" @click="emit('addToMonth', -1)" />
-      <span class="w-32 text-center font-medium text-base">
-        {{ props.firstOfMonth.format('MMMM') }}, {{ props.firstOfMonth.format('YYYY') }}
+      <Button icon="chevron-left" variant="ghost" @click="goToPreviousPeriod" />
+      <span class="w-36 text-center font-medium text-base">
+        {{ periodLabel }}
       </span>
-      <Button icon="chevron-right" variant="ghost" @click="emit('addToMonth', 1)" />
+      <Button icon="chevron-right" variant="ghost" @click="goToNextPeriod" />
     </div>
 
     <!-- Availability range -->
@@ -35,7 +35,7 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { FormControl, DateRangePicker, Button, createResource, createListResource } from 'frappe-ui'
 import type { Dayjs } from 'dayjs'
 import { raiseToast } from '../utils'
@@ -48,13 +48,30 @@ export type FilterField =
   | 'shift_type'
   | 'shift_location'
 
-const props = defineProps<{ firstOfMonth: Dayjs }>()
+type ViewMode = 'month' | 'year'
+
+const props = withDefaults(defineProps<{ firstOfMonth: Dayjs; viewMode?: ViewMode }>(), {
+  viewMode: 'month',
+})
 const emit = defineEmits<{
   (e: 'addToMonth', change: number): void
   (e: 'updateFilters', newFilters: { [K in FilterField]: string }): void
   (e: 'updateDateRange', payload: { from: string | null; to: string | null }): void
   (e: 'updateProjectShiftsFilled', value: 0 | 1): void
 }>()
+
+const periodLabel = computed(() => {
+  if (props.viewMode === 'year') return props.firstOfMonth.format('YYYY')
+  return `${props.firstOfMonth.format('MMMM')}, ${props.firstOfMonth.format('YYYY')}`
+})
+
+function goToPreviousPeriod() {
+  emit('addToMonth', props.viewMode === 'year' ? -12 : -1)
+}
+
+function goToNextPeriod() {
+  emit('addToMonth', props.viewMode === 'year' ? 12 : 1)
+}
 
 /** Date range model (support string/object/array from different frappe-ui builds) */
 const dateRangeValue = ref<
@@ -116,9 +133,9 @@ watch(
   (val) => {
     const { from, to } = normalizeRange(val)
     if (!from || !to) {
-	emit('updateDateRange', { from: null, to: null })
-	return
-	}
+      emit('updateDateRange', { from: null, to: null })
+      return
+    }
     let a = from, b = to
     if (a > b) [a, b] = [b, a]
     emit('updateDateRange', { from: a, to: b })

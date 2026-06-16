@@ -23,13 +23,57 @@ def get_values(doctype: str, name: str, fields: list) -> dict[str, str]:
 def get_events(
 	month_start: str, month_end: str, employee_filters: dict[str, str], shift_filters: dict[str, str]
 ) -> dict[str, list[dict]]:
+	employee_filters = _clean_filters(employee_filters)
+	shift_filters = _clean_filters(shift_filters)
+
 	holidays = get_holidays(month_start, month_end, employee_filters)
 	leaves = get_leaves(month_start, month_end, employee_filters)
 	shifts = get_shifts(month_start, month_end, employee_filters, shift_filters)
 
+	return merge_employee_events(holidays, leaves, shifts)
+
+
+@frappe.whitelist()
+def get_year_events(
+	year: str | int, employee_filters: dict[str, str], shift_filters: dict[str, str]
+) -> dict:
+	"""Return compact annual roster data.
+
+	The annual view keeps project/planning rows and employee rows separate. Employee
+	rows still use the same holiday, leave and shift assignment data as the month
+	view, while project rows are a compact daily summary by Shift Assignment
+	custom_project/custom_project_name.
+	"""
+	employee_filters = _clean_filters(employee_filters)
+	shift_filters = _clean_filters(shift_filters)
+
+	year = int(year)
+	year_start = f"{year}-01-01"
+	year_end = f"{year}-12-31"
+
+	holidays = get_holidays(year_start, year_end, employee_filters)
+	leaves = get_leaves(year_start, year_end, employee_filters)
+	shift_rows = get_shift_rows(year_start, year_end, employee_filters, shift_filters)
+	shifts = group_by_employee(shift_rows)
+
+	return {
+		"events": merge_employee_events(holidays, leaves, shifts),
+		"project_rows": get_year_project_rows(shift_rows, year_start, year_end),
+	}
+
+
+def _clean_filters(filters: dict | str | None) -> dict:
+	if not filters:
+		return {}
+	if isinstance(filters, str):
+		filters = frappe.parse_json(filters) or {}
+	return {key: value for key, value in dict(filters).items() if value not in (None, "")}
+
+
+def merge_employee_events(*event_groups: dict[str, list[dict]]) -> dict[str, list[dict]]:
 	events = {}
-	for event in [holidays, leaves, shifts]:
-		for key, value in event.items():
+	for event_group in event_groups:
+		for key, value in event_group.items():
 			if key in events:
 				events[key].extend(value)
 			else:
@@ -133,12 +177,14 @@ def swap_shift(
 			tgt_shift_doc.custom_project,
 		)
 
+
 @frappe.whitelist()
 def _to_date_str(value):
 	if not value:
 		return None
 	# getdate handles str/date/datetime; str() gives YYYY-MM-DD for date
 	return str(getdate(value))
+
 
 @frappe.whitelist()
 def break_shift(assignment: str | ShiftAssignment, date: str) -> None:
@@ -167,68 +213,77 @@ def break_shift(assignment: str | ShiftAssignment, date: str) -> None:
 
 	if not end_date or date_diff(end_date, date) > 0:
 		create_shift_assignment(
-			employee, company, shift_type, _to_date_str(add_days(date, 1)), _to_date_str(end_date), status, custom_project, shift_location
+			employee,
+			company,
+			shift_type,
+			_to_date_str(add_days(date, 1)),
+			_to_date_str(end_date),
+			status,
+			custom_project,
+			shift_location,
 		)
 
 
 @frappe.whitelist()
 def insert_shift(
-    employee: str,
-    company: str,
-    shift_type: str,
-    start_date: str,
-    end_date: str | None,
-    status: str,
-    shift_location: str | None = None,
-    custom_project: str | None = None,
+	employee: str,
+	company: str,
+	shift_type: str,
+	start_date: str,
+	end_date: str | None,
+	status: str,
+	shift_location: str | None = None,
+	custom_project: str | None = None,
 ) -> None:
-    from frappe.utils import add_days
-    # Treat project as part of the identity so only same-project blocks merge
-    filters = {
-        "doctype": "Shift Assignment",
-        "employee": employee,
-        "company": company,
-        "shift_type": shift_type,
-        "status": status,
-        "shift_location": shift_location,
-        "custom_project": custom_project,
-    }
+	from frappe.utils import add_days
 
-    prev_shift = frappe.db.exists(dict({"end_date": add_days(start_date, -1)}, **filters))
-    next_shift = (
-        frappe.db.exists(dict({"start_date": add_days(end_date, 1)}, **filters)) if end_date else None
-    )
+	# Treat project as part of the identity so only same-project blocks merge
+	filters = {
+		"doctype": "Shift Assignment",
+		"employee": employee,
+		"company": company,
+		"shift_type": shift_type,
+		"status": status,
+		"shift_location": shift_location,
+		"custom_project": custom_project,
+	}
 
-    if prev_shift:
-        if next_shift:
-            end_date = frappe.db.get_value("Shift Assignment", next_shift, "end_date")
-            frappe.db.set_value("Shift Assignment", next_shift, "docstatus", 2)
-            frappe.delete_doc("Shift Assignment", next_shift)
+	prev_shift = frappe.db.exists(dict({"end_date": add_days(start_date, -1)}, **filters))
+	next_shift = (
+		frappe.db.exists(dict({"start_date": add_days(end_date, 1)}, **filters)) if end_date else None
+	)
 
-        frappe.db.set_value("Shift Assignment", prev_shift, "end_date", end_date or None)
-        # ensure project sticks even if previous block had None
-        if custom_project:
-            frappe.db.set_value("Shift Assignment", prev_shift, "custom_project", custom_project)
+	if prev_shift:
+		if next_shift:
+			end_date = frappe.db.get_value("Shift Assignment", next_shift, "end_date")
+			frappe.db.set_value("Shift Assignment", next_shift, "docstatus", 2)
+			frappe.delete_doc("Shift Assignment", next_shift)
 
-    elif next_shift:
-        frappe.db.set_value("Shift Assignment", next_shift, "start_date", start_date)
-        if custom_project:
-            frappe.db.set_value("Shift Assignment", next_shift, "custom_project", custom_project)
+		frappe.db.set_value("Shift Assignment", prev_shift, "end_date", end_date or None)
+		# ensure project sticks even if previous block had None
+		if custom_project:
+			frappe.db.set_value("Shift Assignment", prev_shift, "custom_project", custom_project)
 
-    else:
-        create_shift_assignment(
-            employee=employee,
-            company=company,
-            shift_type=shift_type,
-            start_date=start_date,
-            end_date=end_date,
-            status=status,
-            custom_project=custom_project,
-            shift_location=shift_location,
-        )
+	elif next_shift:
+		frappe.db.set_value("Shift Assignment", next_shift, "start_date", start_date)
+		if custom_project:
+			frappe.db.set_value("Shift Assignment", next_shift, "custom_project", custom_project)
+
+	else:
+		create_shift_assignment(
+			employee=employee,
+			company=company,
+			shift_type=shift_type,
+			start_date=start_date,
+			end_date=end_date,
+			status=status,
+			custom_project=custom_project,
+			shift_location=shift_location,
+		)
 
 
 def get_holidays(month_start: str, month_end: str, employee_filters: dict[str, str]) -> dict[str, list[dict]]:
+	employee_filters = _clean_filters(employee_filters)
 	holidays = {}
 	holiday_lists = {}
 
@@ -247,6 +302,7 @@ def get_holidays(month_start: str, month_end: str, employee_filters: dict[str, s
 
 
 def get_leaves(month_start: str, month_end: str, employee_filters: dict[str, str]) -> dict[str, list[dict]]:
+	employee_filters = _clean_filters(employee_filters)
 	LeaveApplication = frappe.qb.DocType("Leave Application")
 	Employee = frappe.qb.DocType("Employee")
 
@@ -278,6 +334,15 @@ def get_leaves(month_start: str, month_end: str, employee_filters: dict[str, str
 def get_shifts(
 	month_start: str, month_end: str, employee_filters: dict[str, str], shift_filters: dict[str, str]
 ) -> dict[str, list[dict]]:
+	return group_by_employee(get_shift_rows(month_start, month_end, employee_filters, shift_filters))
+
+
+def get_shift_rows(
+	month_start: str, month_end: str, employee_filters: dict[str, str], shift_filters: dict[str, str]
+) -> list[dict]:
+	employee_filters = _clean_filters(employee_filters)
+	shift_filters = _clean_filters(shift_filters)
+
 	ShiftAssignment = frappe.qb.DocType("Shift Assignment")
 	ShiftType = frappe.qb.DocType("Shift Type")
 	Employee = frappe.qb.DocType("Employee")
@@ -292,6 +357,7 @@ def get_shifts(
 			ShiftAssignment.end_date,
 			ShiftAssignment.status,
 			ShiftAssignment.shift_schedule_assignment,
+			ShiftAssignment.custom_project,
 			ShiftAssignment.custom_project_name,
 			ShiftAssignment.note,
 			ShiftType.start_time,
@@ -316,7 +382,110 @@ def get_shifts(
 	for filter in shift_filters:
 		query = query.where(ShiftAssignment[filter] == shift_filters[filter])
 
-	return group_by_employee(query.run(as_dict=True))
+	return query.run(as_dict=True)
+
+
+def get_active_project_meta(project_names: list[str] | set[str]) -> dict[str, dict]:
+	"""Return Project metadata for projects that should appear in annual planning rows.
+
+	The annual project/planning table should only show active/open projects.
+	Employee rows are intentionally left unchanged so historical/assigned shifts still
+	appear for employees if they exist in the selected year.
+	"""
+	project_names = sorted({project for project in project_names if project})
+	if not project_names:
+		return {}
+
+	inactive_statuses = [
+		"Completed",
+		"Cancelled",
+		"Closed",
+		"Archived",
+		"Inactive",
+	]
+
+	projects = frappe.get_all(
+		"Project",
+		filters={
+			"name": ["in", project_names],
+			"status": ["not in", inactive_statuses],
+		},
+		fields=["name", "project_name", "status"],
+	)
+
+	return {project.name: project for project in projects}
+
+
+def get_year_project_rows(shift_rows: list[dict], year_start: str, year_end: str) -> list[dict]:
+	projects = {}
+	year_start_date = getdate(year_start)
+	year_end_date = getdate(year_end)
+
+	active_projects = get_active_project_meta(
+		{shift.get("custom_project") for shift in shift_rows if shift.get("custom_project")}
+	)
+
+	for shift in shift_rows:
+		project = shift.get("custom_project")
+
+		# Only show active/open linked projects in the annual Projects / Planning table.
+		# Skip unallocated rows and projects that are completed/cancelled/closed/etc.
+		if not project or project not in active_projects:
+			continue
+
+		project_meta = active_projects[project]
+		project_name = (
+			project_meta.get("project_name")
+			or shift.get("custom_project_name")
+			or project
+		)
+
+		if project not in projects:
+			projects[project] = {
+				"project": project,
+				"project_name": project_name,
+				"status": project_meta.get("status"),
+				"assignments": {},
+			}
+
+		start_date = max(getdate(shift.get("start_date")), year_start_date)
+		end_date = getdate(shift.get("end_date")) if shift.get("end_date") else year_end_date
+		end_date = min(end_date, year_end_date)
+
+		current = start_date
+		while current <= end_date:
+			date_key = str(current)
+			cell = projects[project]["assignments"].setdefault(
+				date_key,
+				{
+					"count": 0,
+					"color": None,
+					"_shift_types": [],
+					"_employees": [],
+				},
+			)
+			cell["count"] += 1
+			if not cell["color"] and shift.get("color"):
+				cell["color"] = str(shift.get("color")).lower()
+			if shift.get("shift_type"):
+				cell["_shift_types"].append(shift.get("shift_type"))
+			if shift.get("employee"):
+				cell["_employees"].append(shift.get("employee"))
+			current = getdate(add_days(current, 1))
+
+	for project in projects.values():
+		for cell in project["assignments"].values():
+			shift_types = sorted(set(cell.pop("_shift_types", [])))
+			employees = sorted(set(cell.pop("_employees", [])))
+			cell["shift_types"] = shift_types
+			cell["employees"] = employees
+			cell["count"] = len(employees) or cell["count"]
+			if cell["count"] > 1:
+				cell["label"] = str(cell["count"])
+			else:
+				cell["label"] = shift_types[0] if shift_types else "1"
+
+	return sorted(projects.values(), key=lambda row: row["project_name"] or "")
 
 
 def group_by_employee(events: list[dict]) -> dict[str, list[dict]]:
@@ -327,26 +496,27 @@ def group_by_employee(events: list[dict]) -> dict[str, list[dict]]:
 		)
 	return grouped_events
 
+
 @frappe.whitelist()
 def get_available_employees(from_date: str, to_date: str, **employee_filters) -> dict:
-    ALLOWED = {"company", "department", "branch", "designation", "status"}
-    ef = {k: v for k, v in (employee_filters or {}).items() if k in ALLOWED and v}
-    all_emp_names = set(frappe.get_all("Employee", filters=ef, pluck="name"))
-    if not all_emp_names:
-        return {"employees": []}
-    ShiftAssignment = frappe.qb.DocType("Shift Assignment")
-    busy_rows = (
-        frappe.qb.select(ShiftAssignment.employee)
-        .from_(ShiftAssignment)
-        .where(
-            (ShiftAssignment.docstatus == 1)
-            & (ShiftAssignment.start_date <= to_date)
-            & ((ShiftAssignment.end_date >= from_date) | (ShiftAssignment.end_date.isnull()))
-            & (ShiftAssignment.employee.isin(list(all_emp_names)))
-        )
-        .distinct()
-    ).run(pluck="employee")
+	ALLOWED = {"company", "department", "branch", "designation", "status"}
+	ef = {k: v for k, v in (employee_filters or {}).items() if k in ALLOWED and v}
+	all_emp_names = set(frappe.get_all("Employee", filters=ef, pluck="name"))
+	if not all_emp_names:
+		return {"employees": []}
+	ShiftAssignment = frappe.qb.DocType("Shift Assignment")
+	busy_rows = (
+		frappe.qb.select(ShiftAssignment.employee)
+		.from_(ShiftAssignment)
+		.where(
+			(ShiftAssignment.docstatus == 1)
+			& (ShiftAssignment.start_date <= to_date)
+			& ((ShiftAssignment.end_date >= from_date) | (ShiftAssignment.end_date.isnull()))
+			& (ShiftAssignment.employee.isin(list(all_emp_names)))
+		)
+		.distinct()
+	).run(pluck="employee")
 
-    busy = set(busy_rows or [])
-    available = sorted(all_emp_names - busy)
-    return {"employees": [{"name": e} for e in available]}
+	busy = set(busy_rows or [])
+	available = sorted(all_emp_names - busy)
+	return {"employees": [{"name": e} for e in available]}

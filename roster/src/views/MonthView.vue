@@ -5,7 +5,36 @@
       <div class="flex items-center">
         <FeatherIcon name="calendar" class="h-7 w-7 text-gray-500 mr-2.5" />
         <span class="font-semibold text-2xl text-gray-500 mr-2">Roster:</span>
-        <span class="font-semibold text-2xl">Month View</span>
+        <span class="font-semibold text-2xl">{{ activeViewLabel }}</span>
+
+        <div class="ml-6 inline-flex rounded-md border border-gray-200 bg-gray-50 p-0.5">
+          <button
+            type="button"
+            class="px-3 py-1.5 text-sm font-medium rounded transition"
+            :class="viewMode === 'month' ? 'bg-white shadow-sm text-gray-900' : 'text-gray-600 hover:text-gray-900'"
+            @click="setViewMode('month')"
+          >
+            Month
+          </button>
+          <button
+            type="button"
+            class="px-3 py-1.5 text-sm font-medium rounded transition"
+            :class="viewMode === 'year' ? 'bg-white shadow-sm text-gray-900' : 'text-gray-600 hover:text-gray-900'"
+            @click="setViewMode('year')"
+          >
+            Annual
+          </button>
+        </div>
+
+        <button
+          v-if="viewMode === 'year'"
+          type="button"
+          class="ml-2 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50 hover:text-gray-900"
+          @click="goToToday"
+        >
+          Today
+        </button>
+
         <div class="ml-auto space-x-2.5">
           <Dropdown
             :options="VIEW_OPTIONS"
@@ -28,6 +57,7 @@
     <div ref="filtersRef" class="px-12 pb-4">
       <MonthViewHeader
         :firstOfMonth="firstOfMonth"
+        :viewMode="viewMode"
         @updateFilters="updateFilters"
         @addToMonth="addToMonth"
         @updateDateRange="onUpdateDateRange"
@@ -35,8 +65,8 @@
       />
     </div>
 
-    <!-- Projects timeline (collapsible) -->
-    <div ref="timelineRef" class="px-12 pb-4">
+    <!-- Projects timeline (collapsible) - month view only -->
+    <div v-show="viewMode === 'month'" ref="timelineRef" class="px-12 pb-4">
       <ProjectTimelineRow
         v-model:collapsed="projectsCollapsed"
         :firstOfMonth="firstOfMonth"
@@ -51,7 +81,7 @@
     <!-- Table area fills remaining height -->
     <div class="px-12 pb-8 flex-1 min-h-0 mt-px">
       <MonthViewTable
-        v-if="isCompanySelected"
+        v-if="isCompanySelected && viewMode === 'month'"
         ref="monthViewTable"
         :firstOfMonth="firstOfMonth"
         :employees="availableEmployees"
@@ -60,6 +90,18 @@
         :maxHeightPx="tableHeight"
         @hscroll="hScroll = $event"
       />
+
+      <YearViewTable
+        v-else-if="isCompanySelected && viewMode === 'year'"
+        ref="yearViewTable"
+        :firstOfMonth="firstOfMonth"
+        :employees="availableEmployees"
+        :employeeFilters="employeeFilters"
+        :shiftFilters="shiftFilters"
+        :maxHeightPx="tableHeight"
+        @hscroll="hScroll = $event"
+      />
+
       <div v-else class="py-40 text-center">Please select a company.</div>
     </div>
   </div>
@@ -69,17 +111,18 @@
     :isDialogOpen="showShiftAssignmentDialog"
     :employees="employees.data"
     @fetchEvents="
-      monthViewTable?.events.fetch();
+      fetchActiveEvents();
       showShiftAssignmentDialog = false;
     "
   />
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onBeforeUnmount, toRaw, watch } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, toRaw, watch } from 'vue'
 import { Dropdown, FeatherIcon, createListResource, createResource } from 'frappe-ui'
 import { dayjs, goTo, raiseToast } from '../utils'
 import MonthViewTable from '../components/MonthViewTable.vue'
+import YearViewTable from '../components/YearViewTable.vue'
 import ProjectTimelineRow from '../components/ProjectTimelineRow.vue'
 import MonthViewHeader from '../components/MonthViewHeader.vue'
 import ShiftAssignmentDialog from '../components/ShiftAssignmentDialog.vue'
@@ -92,11 +135,14 @@ export type ShiftFilters = {
 };
 
 type AvailabilityResponse = { employees: { name: string }[] }
+type ViewMode = 'month' | 'year'
 
 const monthViewTable = ref<InstanceType<typeof MonthViewTable>>()
+const yearViewTable = ref<InstanceType<typeof YearViewTable>>()
 const isCompanySelected = ref(false)
 const showShiftAssignmentDialog = ref(false)
 const firstOfMonth = ref(dayjs().date(1).startOf('D'))
+const viewMode = ref<ViewMode>('month')
 const employeeFilters = reactive<EmployeeFilters>({ status: 'Active' })
 const shiftFilters = reactive<ShiftFilters>({})
 const dateRange = reactive<{ from: string | null; to: string | null }>({ from: null, to: null })
@@ -114,6 +160,8 @@ let roToolbar: ResizeObserver | null = null
 let roFilters: ResizeObserver | null = null
 let roTimeline: ResizeObserver | null = null
 
+const activeViewLabel = computed(() => viewMode.value === 'month' ? 'Month View' : 'Annual View')
+
 const VIEW_OPTIONS = [
   'Shift Type',
   'Shift Location',
@@ -125,11 +173,42 @@ const VIEW_OPTIONS = [
   onClick: () => goTo(`/app/${label.toLowerCase().split(' ').join('-')}`),
 }))
 
+function setViewMode(mode: ViewMode) {
+  if (mode === 'year') {
+    goToToday()
+    return
+  }
+
+  viewMode.value = mode
+  hScroll.value = 0
+}
+
+async function goToToday() {
+  viewMode.value = 'year'
+  firstOfMonth.value = dayjs().date(1).startOf('D')
+  hScroll.value = 0
+
+  await nextTick()
+
+  const runScroll = () => yearViewTable.value?.scrollToToday?.()
+
+  window.requestAnimationFrame(() => {
+    runScroll()
+    window.setTimeout(runScroll, 80)
+    window.setTimeout(runScroll, 250)
+  })
+}
+
+function fetchActiveEvents() {
+  if (viewMode.value === 'month') monthViewTable.value?.events.fetch()
+  else yearViewTable.value?.events.fetch()
+}
+
 function addToMonth(change: number) {
   firstOfMonth.value = firstOfMonth.value.add(change, 'M')
-  // If you want the dateRange to snap with month navigation, uncomment:
-  // dateRange.from = firstOfMonth.value.startOf('month').format('YYYY-MM-DD')
-  // dateRange.to   = firstOfMonth.value.endOf('month').format('YYYY-MM-DD')
+  // If you want the dateRange to snap with month/year navigation, uncomment:
+  // dateRange.from = firstOfMonth.value.startOf(viewMode.value === 'year' ? 'year' : 'month').format('YYYY-MM-DD')
+  // dateRange.to = firstOfMonth.value.endOf(viewMode.value === 'year' ? 'year' : 'month').format('YYYY-MM-DD')
   // fetchAvailability()
 }
 
@@ -158,7 +237,7 @@ function updateFilters(newFilters: EmployeeFilters & ShiftFilters) {
 const tableHeight = computed(() => {
   const innerBottomPadding = 32
   const extraShave = 50
-  const used = toolbarHeight.value + filtersHeight.value + timelineHeight.value
+  const used = toolbarHeight.value + filtersHeight.value + (viewMode.value === 'month' ? timelineHeight.value : 0)
   const remaining = vh.value - used - innerBottomPadding - extraShave
   return Math.max(200, remaining)
 })
@@ -210,7 +289,7 @@ onBeforeUnmount(() => {
 
 const employees = createListResource({
   doctype: 'Employee',
-  fields: ['name', 'employee_name', 'designation', 'image'],
+  fields: ['name', 'employee_name', 'first_name', 'last_name', 'designation', 'image'],
   filters: employeeFilters,
   pageLength: 99999,
   onSuccess() {
