@@ -8,7 +8,7 @@
     :style="maxHeightPx ? { height: maxHeightPx + 'px' } : {}"
   >
     <!-- Annual project / planning view. This is intentionally separate from employees. -->
-    <section v-if="projectRows.length" class="year-roster-panel rounded-lg border bg-white">
+    <section v-if="showProjectsPanel" class="year-roster-panel rounded-lg border bg-white">
       <div
         ref="projectScroller"
         class="year-roster-scroller overflow-auto"
@@ -32,9 +32,22 @@
             <tr>
               <th rowspan="2" class="year-left-header year-left-col year-project-legend-header border-b border-r bg-white text-left">
                 <div class="year-project-header-content px-2 py-1.5">
-                  <div class="flex items-center gap-1.5 text-xs font-semibold text-gray-800">
-                    <span class="year-project-header-icon">▱</span>
-                    <span>Projects</span>
+                  <div class="flex items-center justify-between gap-2 text-xs font-semibold text-gray-800">
+                    <div class="flex min-w-0 items-center gap-1.5">
+                      <span class="year-project-header-icon">▱</span>
+                      <span>Projects</span>
+                    </div>
+
+                    <button
+                      v-if="projectRows.length"
+                      type="button"
+                      class="year-section-toggle year-section-inline-toggle"
+                      :class="projectCollapsed && 'year-section-toggle-inactive'"
+                      @click.stop="toggleProjectCollapsed"
+                    >
+                      <span class="year-section-toggle-icon">{{ projectCollapsed ? '▸' : '▾' }}</span>
+                      <span>{{ projectCollapsed ? 'Show' : 'Hide' }}</span>
+                    </button>
                   </div>
 
                   <div class="mt-1 text-[10px] font-semibold leading-none text-gray-600">Legend</div>
@@ -86,7 +99,7 @@
             </tr>
           </thead>
 
-          <tbody>
+          <tbody v-show="showProjectBody">
             <tr v-for="project in projectRows" :key="project.project_name" class="year-project-row">
               <td class="year-left-col border-b border-r bg-white">
                 <div class="truncate px-2 text-xs font-medium text-gray-700" :title="project.project_name">
@@ -135,7 +148,7 @@
     </section>
 
     <!-- Annual employee roster view. This scrolls separately from the project table. -->
-    <section class="year-roster-panel year-employee-panel flex min-h-0 flex-1 flex-col rounded-lg border bg-white">
+    <section v-if="showEmployeesPanel" class="year-roster-panel year-employee-panel flex min-h-0 flex-1 flex-col rounded-lg border bg-white">
       <div
         ref="employeeScroller"
         class="year-roster-scroller min-h-0 flex-1 overflow-auto"
@@ -159,8 +172,18 @@
             <tr>
               <th rowspan="2" class="year-left-header year-left-col year-employee-search-header border-b border-r bg-white text-left">
                 <div class="year-employee-header-content px-2 py-1.5">
-                  <div class="flex items-center gap-2">
+                  <div class="flex items-center justify-between gap-2">
                     <div class="text-xs font-semibold text-gray-700">Employee</div>
+
+                    <button
+                      type="button"
+                      class="year-section-toggle year-section-inline-toggle"
+                      :class="employeeCollapsed && 'year-section-toggle-inactive'"
+                      @click.stop="toggleEmployeeCollapsed"
+                    >
+                      <span class="year-section-toggle-icon">{{ employeeCollapsed ? '▸' : '▾' }}</span>
+                      <span>{{ employeeCollapsed ? 'Show' : 'Hide' }}</span>
+                    </button>
                   </div>
 
                   <div class="year-employee-search">
@@ -221,7 +244,7 @@
             </tr>
           </thead>
 
-          <tbody>
+          <tbody v-show="showEmployeeBody">
             <tr v-for="employee in visibleEmployees" :key="employee.name" class="year-employee-row">
               <td class="year-left-col border-b border-r bg-white">
                 <div class="px-2 leading-tight">
@@ -379,7 +402,9 @@ const props = defineProps<{
 }>()
 
 const loading = ref(true)
-const employeeSearch = ref<{ value: string; label: string }[]>()
+const employeeSearch = ref<{ value: string; label: string }[]>([])
+const projectCollapsed = ref(false)
+const employeeCollapsed = ref(false)
 const shiftAssignment = ref<string>('')
 const showShiftAssignmentDialog = ref(false)
 const selectedCell = ref<{ employee: string; date: string }>({ employee: '', date: '' })
@@ -502,6 +527,29 @@ const visibleEmployees = computed(() => {
 const projectRows = computed(() => {
   return (events.data?.projectRows || []) as ProjectRow[]
 })
+
+const showProjectsPanel = computed(() => projectRows.value.length > 0)
+const showEmployeesPanel = computed(() => true)
+const showProjectBody = computed(() => projectRows.value.length > 0 && !projectCollapsed.value)
+const showEmployeeBody = computed(() => !employeeCollapsed.value)
+
+function toggleProjectCollapsed() {
+  if (!projectCollapsed.value && employeeCollapsed.value) {
+    raiseToast('error', 'At least one annual roster section must remain visible')
+    return
+  }
+
+  projectCollapsed.value = !projectCollapsed.value
+}
+
+function toggleEmployeeCollapsed() {
+  if (!employeeCollapsed.value && (projectCollapsed.value || !projectRows.value.length)) {
+    raiseToast('error', 'At least one annual roster section must remain visible')
+    return
+  }
+
+  employeeCollapsed.value = !employeeCollapsed.value
+}
 
 type ProjectSpan = {
   start: string
@@ -663,7 +711,23 @@ function projectSegments(project: ProjectRow): ProjectSegment[] {
   return segments
 }
 
+const sectionGap = 16
+const PROJECT_COLLAPSED_HEIGHT = 74
+const EMPLOYEE_COLLAPSED_HEIGHT = 96
+
+const annualContentHeight = computed(() => {
+  const total = props.maxHeightPx || 650
+  return Math.max(220, total)
+})
+
 const projectTableMaxHeight = computed(() => {
+  if (!showProjectsPanel.value) return 0
+  if (projectCollapsed.value) return PROJECT_COLLAPSED_HEIGHT
+
+  if (employeeCollapsed.value) {
+    return Math.max(220, annualContentHeight.value - EMPLOYEE_COLLAPSED_HEIGHT - sectionGap)
+  }
+
   const headerHeight = 52
   const rowHeight = 30
   const naturalHeight = headerHeight + projectRows.value.length * rowHeight
@@ -671,9 +735,12 @@ const projectTableMaxHeight = computed(() => {
 })
 
 const employeeTableMaxHeight = computed(() => {
-  const total = props.maxHeightPx || 650
-  const projectPanelUsed = projectRows.value.length ? projectTableMaxHeight.value + 16 : 0
-  return Math.max(220, total - projectPanelUsed)
+  if (employeeCollapsed.value) return EMPLOYEE_COLLAPSED_HEIGHT
+
+  if (!showProjectsPanel.value) return annualContentHeight.value
+
+  const projectPanelUsed = projectTableMaxHeight.value + sectionGap
+  return Math.max(220, annualContentHeight.value - projectPanelUsed)
 })
 
 function employeeDisplayName(employee: Employee) {
@@ -987,6 +1054,45 @@ defineExpose({ events, scrollToToday })
 </script>
 
 <style scoped>
+.year-section-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  border-radius: 6px;
+  border: 1px solid rgb(209 213 219);
+  background: rgb(255 255 255);
+  padding: 4px 9px;
+  color: rgb(55 65 81);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.year-section-toggle:hover {
+  background: rgb(249 250 251);
+}
+
+.year-section-toggle-inactive {
+  border-color: rgb(229 231 235);
+  background: rgb(249 250 251);
+  color: rgb(107 114 128);
+}
+
+.year-section-toggle-icon {
+  display: inline-flex;
+  width: 10px;
+  justify-content: center;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.year-section-inline-toggle {
+  min-height: 22px;
+  padding: 3px 7px;
+  font-size: 10px;
+}
+
 .year-table-stage {
   position: relative;
   display: inline-block;
