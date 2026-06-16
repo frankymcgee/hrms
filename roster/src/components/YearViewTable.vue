@@ -113,8 +113,11 @@
                 class="year-cell year-project-cell border-b border-r text-center"
                 :class="projectSegmentClass(segment)"
                 :style="projectSegmentStyle(segment)"
-                :title="segment.title"
+                :aria-label="segment.title"
                 :colspan="segment.days"
+                @mouseenter="showProjectHover(project, segment, $event)"
+                @mousemove="moveHoverCard"
+                @mouseleave="clearHoverCard"
               >
                 <div v-if="segment.active" class="year-project-span-content">
                   <span
@@ -266,7 +269,10 @@
                   'year-weekend': day.isWeekend,
                 }"
                 :style="employeeCellStyle(employee.name, day.date)"
-                :title="employeeCellTitle(employee.name, day.date)"
+                :aria-label="employeeCellTitle(employee.name, day.date)"
+                @mouseenter="showEmployeeHover(employee, day.date, $event)"
+                @mousemove="moveHoverCard"
+                @mouseleave="clearHoverCard"
                 @click="openEmployeeCell(employee.name, day.date)"
               >
                 {{ employeeCellLabel(employee.name, day.date) }}
@@ -278,6 +284,51 @@
       </div>
     </section>
   </div>
+
+
+  <Teleport to="body">
+    <div
+      v-if="hoverCard"
+      ref="hoverCardElement"
+      class="year-hover-card"
+      :class="`year-hover-card-${hoverCard.type}`"
+      :style="hoverCardStyle"
+      role="tooltip"
+    >
+      <div class="year-hover-card-header">
+        <div class="min-w-0">
+          <div class="year-hover-card-kicker">{{ hoverCard.kicker }}</div>
+          <div class="year-hover-card-title truncate">{{ hoverCard.title }}</div>
+          <div v-if="hoverCard.subtitle" class="year-hover-card-subtitle truncate">
+            {{ hoverCard.subtitle }}
+          </div>
+        </div>
+
+        <span
+          v-if="hoverCard.badge"
+          class="year-hover-card-badge"
+          :class="`year-hover-card-badge-${hoverCard.badgeTone || 'gray'}`"
+        >
+          {{ hoverCard.badge }}
+        </span>
+      </div>
+
+      <div class="year-hover-card-grid">
+        <template v-for="row in hoverCard.rows" :key="row.label">
+          <div v-if="row.value !== undefined && row.value !== null && row.value !== ''" class="year-hover-card-label">
+            {{ row.label }}
+          </div>
+          <div v-if="row.value !== undefined && row.value !== null && row.value !== ''" class="year-hover-card-value truncate">
+            {{ row.value }}
+          </div>
+        </template>
+      </div>
+
+      <div v-if="hoverCard.note" class="year-hover-card-note">
+        {{ hoverCard.note }}
+      </div>
+    </div>
+  </Teleport>
 
   <ShiftAssignmentDialog
     v-model="showShiftAssignmentDialog"
@@ -293,7 +344,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import colors from 'tailwindcss/colors'
 import { Autocomplete, createResource } from 'frappe-ui'
 import type { Dayjs } from 'dayjs'
@@ -409,6 +460,28 @@ const shiftAssignment = ref<string>('')
 const showShiftAssignmentDialog = ref(false)
 const selectedCell = ref<{ employee: string; date: string }>({ employee: '', date: '' })
 
+type HoverCardRow = {
+  label: string
+  value?: string | number | null
+}
+
+type HoverCard = {
+  type: 'shift' | 'project'
+  x: number
+  y: number
+  kicker: string
+  title: string
+  subtitle?: string
+  badge?: string
+  badgeTone?: 'green' | 'red' | 'gray' | 'blue'
+  accent?: string
+  rows: HoverCardRow[]
+  note?: string
+}
+
+const hoverCard = ref<HoverCard | null>(null)
+const hoverCardElement = ref<HTMLDivElement | null>(null)
+
 const LEFT_COLUMN_WIDTH = 300
 const DAY_COLUMN_WIDTH = 28
 
@@ -494,6 +567,12 @@ const showTodayOverlay = computed(() => todayIndex.value >= 0)
 const todayOverlayStyle = computed(() => ({
   left: `${LEFT_COLUMN_WIDTH + todayIndex.value * DAY_COLUMN_WIDTH}px`,
   width: `${DAY_COLUMN_WIDTH}px`,
+}))
+
+const hoverCardStyle = computed(() => ({
+  left: `${hoverCard.value?.x || 0}px`,
+  top: `${hoverCard.value?.y || 0}px`,
+  '--year-hover-accent': hoverCard.value?.accent || 'rgb(59 130 246)',
 }))
 
 const employeeSearchOptions = computed(() => {
@@ -960,6 +1039,7 @@ function employeeCellStyle(employee: string, date: string) {
 }
 
 function openEmployeeCell(employee: string, date: string) {
+  clearHoverCard()
   const cell = getEmployeeCell(employee, date)
   if (cell?.type === 'holiday' || cell?.type === 'leave') return
 
@@ -998,6 +1078,131 @@ function projectSegmentStyle(segment: ProjectSegment) {
     borderColor: color[300],
     color: (colors as any).gray[800],
   }
+}
+
+
+function positionHoverCard(event: MouseEvent) {
+  if (!hoverCard.value) return
+
+  const padding = 12
+  const cursorOffset = 14
+  const fallbackCardWidth = 340
+  const fallbackCardHeight = hoverCard.value.type === 'project' ? 168 : 240
+  const cardWidth = hoverCardElement.value?.offsetWidth || fallbackCardWidth
+  const cardHeight = hoverCardElement.value?.offsetHeight || fallbackCardHeight
+  const maxLeft = Math.max(padding, window.innerWidth - cardWidth - padding)
+  const maxTop = Math.max(padding, window.innerHeight - cardHeight - padding)
+
+  let x = event.clientX + cursorOffset
+  if (x + cardWidth + padding > window.innerWidth) {
+    x = event.clientX - cardWidth - cursorOffset
+  }
+
+  let y = event.clientY + cursorOffset
+  if (y + cardHeight + padding > window.innerHeight) {
+    y = event.clientY - cardHeight - cursorOffset
+  }
+
+  hoverCard.value = {
+    ...hoverCard.value,
+    x: Math.min(Math.max(padding, x), maxLeft),
+    y: Math.min(Math.max(padding, y), maxTop),
+  }
+}
+
+function moveHoverCard(event: MouseEvent) {
+  positionHoverCard(event)
+}
+
+function clearHoverCard() {
+  hoverCard.value = null
+}
+
+function compactDateRange(startDate?: string | null, endDate?: string | null) {
+  if (!startDate && !endDate) return ''
+  if (startDate && !endDate) return `${dayjs(startDate).format('DD MMM YYYY')} onwards`
+  if (!startDate && endDate) return `Until ${dayjs(endDate).format('DD MMM YYYY')}`
+  return `${dayjs(startDate).format('DD MMM YYYY')} - ${dayjs(endDate).format('DD MMM YYYY')}`
+}
+
+function shiftTimeRange(shift: ShiftAssignment) {
+  if (shift.start_time && shift.end_time) return `${shift.start_time} - ${shift.end_time}`
+  if (shift.start_time) return shift.start_time
+  return ''
+}
+
+function showEmployeeHover(employee: Employee, date: string, event: MouseEvent) {
+  const cell = getEmployeeCell(employee.name, date)
+  if (cell?.type !== 'shift') {
+    clearHoverCard()
+    return
+  }
+
+  const shift = cell.shift
+  const color = palette(shift.color)
+  const accent = hasNote(shift.note) ? (colors as any).red[500] : color[500] || color[400]
+  const customerLabel = shift.customer_abbreviation?.trim() || ''
+
+  hoverCard.value = {
+    type: 'shift',
+    x: event.clientX,
+    y: event.clientY,
+    kicker: 'Shift Allocation',
+    title: customerLabel || shift.shift_type,
+    subtitle: [shift.custom_project_name, shift.shift_location].filter(Boolean).join(' · '),
+    badge: cell.shifts.length > 1 ? `${cell.shifts.length} shifts` : shift.status,
+    badgeTone: hasNote(shift.note) ? 'red' : 'blue',
+    accent,
+    rows: [
+      { label: 'Employee', value: employeeDisplayName(employee) },
+      { label: 'Employee ID', value: employee.name },
+      { label: 'Customer', value: customerLabel },
+      { label: 'Project', value: shift.custom_project_name },
+      { label: 'Shift Type', value: shift.shift_type },
+      { label: 'Time', value: shiftTimeRange(shift) },
+      { label: 'Date', value: dayjs(date).format('dddd, DD MMM YYYY') },
+      { label: 'Range', value: compactDateRange(shift.start_date, shift.end_date) },
+      { label: 'Location', value: shift.shift_location },
+      { label: 'Status', value: shift.status },
+    ],
+    note: shift.note?.trim() || '',
+  }
+
+  positionHoverCard(event)
+  nextTick(() => positionHoverCard(event))
+}
+
+function showProjectHover(project: ProjectRow, segment: ProjectSegment, event: MouseEvent) {
+  if (!segment.active) {
+    clearHoverCard()
+    return
+  }
+
+  const customerColor = normaliseHexColor(segment.customerColor)
+  const fallbackColor = palette(segment.poEntered === false ? 'red' : 'green')
+  const accent = customerColor ? darkenHexColor(customerColor, 0.3) : fallbackColor[500]
+
+  hoverCard.value = {
+    type: 'project',
+    x: event.clientX,
+    y: event.clientY,
+    kicker: 'Project',
+    title: segment.label || project.project_name,
+    subtitle: segment.subline,
+    badge: segment.poEntered ? 'PO Entered' : 'PO Missing',
+    badgeTone: segment.poEntered ? 'green' : 'red',
+    accent,
+    rows: [
+      { label: 'Project ID', value: project.project },
+      { label: 'Status', value: project.status },
+      { label: 'Date Range', value: segment.subline },
+      { label: 'DS Requested', value: segment.dsRequested || 0 },
+      { label: 'NS Requested', value: segment.nsRequested || 0 },
+    ],
+  }
+
+  positionHoverCard(event)
+  nextTick(() => positionHoverCard(event))
 }
 
 function scrollToToday() {
@@ -1433,6 +1638,132 @@ defineExpose({ events, scrollToToday })
 
 .year-legend-ns-requested {
   color: rgb(14 165 233);
+}
+
+
+.year-hover-card {
+  position: fixed;
+  z-index: 9999;
+  width: 340px;
+  max-width: calc(100vw - 24px);
+  pointer-events: none;
+  border: 1px solid rgb(209 213 219);
+  border-left: 4px solid var(--year-hover-accent, rgb(59 130 246));
+  border-radius: 10px;
+  background: rgb(255 255 255 / 0.98);
+  box-shadow: 0 18px 40px rgb(15 23 42 / 0.22), 0 4px 12px rgb(15 23 42 / 0.12);
+  color: rgb(31 41 55);
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  backdrop-filter: blur(8px);
+}
+
+.year-hover-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid rgb(229 231 235);
+  background: linear-gradient(90deg, rgb(249 250 251), rgb(255 255 255));
+  padding: 10px 12px 8px;
+}
+
+.year-hover-card-kicker {
+  color: rgb(107 114 128);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.year-hover-card-title {
+  margin-top: 4px;
+  color: rgb(17 24 39);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.year-hover-card-subtitle {
+  margin-top: 3px;
+  color: rgb(75 85 99);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.year-hover-card-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: max-content;
+  border-radius: 9999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.year-hover-card-badge-green {
+  background: rgb(220 252 231);
+  color: rgb(22 101 52);
+}
+
+.year-hover-card-badge-red {
+  background: rgb(254 226 226);
+  color: rgb(153 27 27);
+}
+
+.year-hover-card-badge-blue {
+  background: rgb(219 234 254);
+  color: rgb(30 64 175);
+}
+
+.year-hover-card-badge-gray {
+  background: rgb(243 244 246);
+  color: rgb(55 65 81);
+}
+
+.year-hover-card-grid {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 5px 10px;
+  padding: 10px 12px;
+}
+
+.year-hover-card-label {
+  color: rgb(107 114 128);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.year-hover-card-value {
+  color: rgb(31 41 55);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.year-hover-card-note {
+  margin: 0 12px 12px;
+  border: 1px solid rgb(254 202 202);
+  border-radius: 8px;
+  background: rgb(254 242 242);
+  padding: 8px;
+  color: rgb(127 29 29);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.year-project-span:hover {
+  filter: saturate(1.08) brightness(0.98);
 }
 
 </style>
