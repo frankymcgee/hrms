@@ -533,6 +533,7 @@ def get_active_project_meta(
 
 	customer_abbreviation_field = _first_existing_project_field(["customer_abbreviation"])
 	customer_field = _first_existing_project_field(["customer"])
+	project_location_field = _first_existing_project_field(["custom_project_location"])
 	start_field = _project_date_field([
 		"expected_start_date",
 		"custom_expected_start_date",
@@ -558,6 +559,7 @@ def get_active_project_meta(
 			ns_field,
 			customer_abbreviation_field,
 			customer_field,
+			project_location_field,
 			start_field,
 			end_field,
 		]
@@ -645,6 +647,7 @@ def get_active_project_meta(
 		project["customer_color"] = (
 			customer_detail.get("customer_color") if customer_detail else None
 		)
+		project["custom_project_location"] = project.get(project_location_field) if project_location_field else None
 		project["_start_field"] = start_field
 		project["_end_field"] = end_field
 
@@ -739,6 +742,7 @@ def get_year_project_rows(shift_rows: list[dict], year_start: str, year_end: str
 			"status": project_meta.get("status"),
 			"customer": project_meta.get("customer"),
 			"customer_name": project_meta.get("customer_name"),
+			"custom_project_location": project_meta.get("custom_project_location"),
 			"po_entered": project_meta.get("po_entered"),
 			"ds_requested": _safe_int(project_meta.get("ds_requested")),
 			"ns_requested": _safe_int(project_meta.get("ns_requested")),
@@ -782,7 +786,11 @@ def get_year_project_rows(shift_rows: list[dict], year_start: str, year_end: str
 
 	return sorted(
 		projects.values(),
-		key=lambda row: ((row.get("customer_name") or row.get("customer") or ""), row.get("project_name") or ""),
+		key=lambda row: (
+			(row.get("customer_name") or row.get("customer") or ""),
+			(row.get("custom_project_location") or ""),
+			row.get("project_name") or "",
+		),
 	)
 
 def group_by_employee(events: list[dict]) -> dict[str, list[dict]]:

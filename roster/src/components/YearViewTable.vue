@@ -103,8 +103,8 @@
             <tr v-for="lane in projectLanes" :key="lane.key" class="year-project-row">
               <td class="year-left-col border-b border-r bg-white">
                 <div class="px-2 leading-tight">
-                  <div class="truncate text-xs font-semibold text-gray-800" :title="lane.customerLabel">
-                    {{ lane.customerLabel }}
+                  <div class="truncate text-xs font-semibold text-gray-800" :title="lane.groupLabel">
+                    {{ lane.groupLabel }}
                   </div>
                   <div class="truncate text-[10px] text-gray-500" :title="projectLaneSubline(lane)">
                     {{ projectLaneSubline(lane) }}
@@ -272,6 +272,7 @@
                 :class="{
                   'year-month-start': day.isMonthStart,
                   'year-weekend': day.isWeekend,
+                  ...employeeCellClass(employee.name, day.date),
                 }"
                 :style="employeeCellStyle(employee.name, day.date)"
                 :aria-label="employeeCellTitle(employee.name, day.date)"
@@ -435,6 +436,7 @@ type ProjectRow = {
   status?: string
   customer?: string | null
   customer_name?: string | null
+  custom_project_location?: string | null
   po_entered?: boolean
   ds_requested?: number
   ns_requested?: number
@@ -474,8 +476,8 @@ type HoverCardRow = {
 
 type HoverCard = {
   type: 'shift' | 'project'
-  x: number
-  y: number
+  x?: number
+  y?: number
   kicker: string
   title: string
   subtitle?: string
@@ -488,6 +490,9 @@ type HoverCard = {
 
 const hoverCard = ref<HoverCard | null>(null)
 const hoverCardElement = ref<HTMLDivElement | null>(null)
+
+let hoverPositionFrame = 0
+let pendingHoverEvent: MouseEvent | null = null
 
 const LEFT_COLUMN_WIDTH = 300
 const DAY_COLUMN_WIDTH = 28
@@ -577,8 +582,6 @@ const todayOverlayStyle = computed(() => ({
 }))
 
 const hoverCardStyle = computed(() => ({
-  left: `${hoverCard.value?.x || 0}px`,
-  top: `${hoverCard.value?.y || 0}px`,
   '--year-hover-accent': hoverCard.value?.accent || 'rgb(59 130 246)',
 }))
 
@@ -616,8 +619,11 @@ const projectRows = computed(() => {
 
 type ProjectLane = {
   key: string
+  groupKey: string
   customerKey: string
   customerLabel: string
+  locationLabel: string
+  groupLabel: string
   laneIndex: number
   projects: ProjectRow[]
 }
@@ -717,6 +723,7 @@ function projectSpanTitle(project: ProjectRow, span: ProjectSpan) {
     project.project_name,
     project.project,
     project.status,
+    projectGroupLabel(project),
     `${dayjs(span.start).format('DD MMM YYYY')} - ${dayjs(span.end).format('DD MMM YYYY')}`,
     span.poEntered ? 'PO Entered' : 'PO Missing',
     `${span.dsRequested || 0} DS Requested`,
@@ -732,34 +739,58 @@ function projectCustomerLabel(project: ProjectRow) {
   return project.customer_name || project.customer || 'Unassigned Customer'
 }
 
+function projectLocationLabel(project: ProjectRow) {
+  return project.custom_project_location?.trim() || 'No Location'
+}
+
+function projectGroupKey(project: ProjectRow) {
+  return `${projectCustomerKey(project)}::${projectLocationLabel(project)}`
+}
+
+function projectGroupLabel(project: ProjectRow) {
+  return `${projectCustomerLabel(project)} - ${projectLocationLabel(project)}`
+}
+
 function projectSpanEndIndex(span: ProjectSpan) {
   return span.startIndex + span.days - 1
 }
 
 const projectLanes = computed<ProjectLane[]>(() => {
-  const grouped = new Map<string, { label: string; projects: ProjectRow[] }>()
+  const grouped = new Map<
+    string,
+    {
+      customerKey: string
+      customerLabel: string
+      locationLabel: string
+      groupLabel: string
+      projects: ProjectRow[]
+    }
+  >()
 
   for (const project of projectRows.value) {
     const span = projectSpan(project)
     if (!span) continue
 
-    const customerKey = projectCustomerKey(project)
-    const existing = grouped.get(customerKey)
+    const groupKey = projectGroupKey(project)
+    const existing = grouped.get(groupKey)
     if (existing) {
       existing.projects.push(project)
     } else {
-      grouped.set(customerKey, {
-        label: projectCustomerLabel(project),
+      grouped.set(groupKey, {
+        customerKey: projectCustomerKey(project),
+        customerLabel: projectCustomerLabel(project),
+        locationLabel: projectLocationLabel(project),
+        groupLabel: projectGroupLabel(project),
         projects: [project],
       })
     }
   }
 
   const lanes: ProjectLane[] = []
-  const sortedGroups = Array.from(grouped.entries()).sort((a, b) => naturalCompare(a[1].label, b[1].label))
+  const sortedGroups = Array.from(grouped.entries()).sort((a, b) => naturalCompare(a[1].groupLabel, b[1].groupLabel))
 
-  for (const [customerKey, group] of sortedGroups) {
-    const customerLanes: ProjectRow[][] = []
+  for (const [groupKey, group] of sortedGroups) {
+    const groupLanes: ProjectRow[][] = []
     const laneEndIndexes: number[] = []
     const sortedProjects = [...group.projects].sort((a, b) => {
       const aSpan = projectSpan(a)
@@ -773,22 +804,25 @@ const projectLanes = computed<ProjectLane[]>(() => {
       const span = projectSpan(project)
       if (!span) continue
 
-      let laneIndex = customerLanes.findIndex((_, index) => span.startIndex > laneEndIndexes[index])
+      let laneIndex = groupLanes.findIndex((_, index) => span.startIndex > laneEndIndexes[index])
       if (laneIndex < 0) {
-        laneIndex = customerLanes.length
-        customerLanes.push([])
+        laneIndex = groupLanes.length
+        groupLanes.push([])
         laneEndIndexes.push(-1)
       }
 
-      customerLanes[laneIndex].push(project)
+      groupLanes[laneIndex].push(project)
       laneEndIndexes[laneIndex] = Math.max(laneEndIndexes[laneIndex], projectSpanEndIndex(span))
     }
 
-    customerLanes.forEach((laneProjects, laneIndex) => {
+    groupLanes.forEach((laneProjects, laneIndex) => {
       lanes.push({
-        key: `${customerKey}-${laneIndex}`,
-        customerKey,
-        customerLabel: group.label,
+        key: `${groupKey}-${laneIndex}`,
+        groupKey,
+        customerKey: group.customerKey,
+        customerLabel: group.customerLabel,
+        locationLabel: group.locationLabel,
+        groupLabel: group.groupLabel,
         laneIndex,
         projects: laneProjects,
       })
@@ -800,7 +834,7 @@ const projectLanes = computed<ProjectLane[]>(() => {
 
 function projectLaneSubline(lane: ProjectLane) {
   const projectCount = lane.projects.length
-  const laneCount = projectLanes.value.filter((item) => item.customerKey === lane.customerKey).length
+  const laneCount = projectLanes.value.filter((item) => item.groupKey === lane.groupKey).length
   const pieces = [`${projectCount} project${projectCount === 1 ? '' : 's'}`]
 
   if (laneCount > 1) {
@@ -858,7 +892,7 @@ function projectLaneSegments(lane: ProjectLane): ProjectSegment[] {
       isMonthStart: day.isMonthStart,
       isWeekend: day.isWeekend,
       isToday: day.isToday,
-      title: `${lane.customerLabel} | ${dayjs(day.date).format('DD MMM YYYY')}`,
+      title: `${lane.groupLabel} | ${dayjs(day.date).format('DD MMM YYYY')}`,
     })
   }
 
@@ -1113,6 +1147,43 @@ function employeeCellTitle(employee: string, date: string) {
   return getEmployeeCell(employee, date)?.title || dayjs(date).format('dddd, DD MMMM YYYY')
 }
 
+function isEmployeeShiftCell(employee: string, date: string) {
+  return getEmployeeCell(employee, date)?.type === 'shift'
+}
+
+function adjacentDate(date: string, days: number) {
+  return dayjs(date).add(days, 'day').format('YYYY-MM-DD')
+}
+
+function employeeShiftContinuesLeft(employee: string, date: string) {
+  return isEmployeeShiftCell(employee, date) && isEmployeeShiftCell(employee, adjacentDate(date, -1))
+}
+
+function employeeShiftContinuesRight(employee: string, date: string) {
+  return isEmployeeShiftCell(employee, date) && isEmployeeShiftCell(employee, adjacentDate(date, 1))
+}
+
+function employeeCellClass(employee: string, date: string) {
+  const isShift = isEmployeeShiftCell(employee, date)
+
+  return {
+    'year-employee-shift-cell': isShift,
+    'year-employee-shift-continues-left': isShift && employeeShiftContinuesLeft(employee, date),
+    'year-employee-shift-continues-right': isShift && employeeShiftContinuesRight(employee, date),
+  }
+}
+
+function shiftRunBoxShadow(employee: string, date: string, borderColor: string) {
+  const continuesLeft = employeeShiftContinuesLeft(employee, date)
+  const continuesRight = employeeShiftContinuesRight(employee, date)
+  const shadows = [`inset 0 1px 0 ${borderColor}`, `inset 0 -1px 0 ${borderColor}`]
+
+  if (!continuesLeft) shadows.push(`inset 1px 0 0 ${borderColor}`)
+  if (!continuesRight) shadows.push(`inset -1px 0 0 ${borderColor}`)
+
+  return shadows.join(', ')
+}
+
 function employeeCellStyle(employee: string, date: string) {
   const cell = getEmployeeCell(employee, date)
   if (!cell) return {}
@@ -1127,11 +1198,13 @@ function employeeCellStyle(employee: string, date: string) {
 
   const color = palette(cell.shift.color)
   const borderColor = hasNote(cell.shift.note) ? (colors as any).red[500] : color[300]
+  const continuesRight = employeeShiftContinuesRight(employee, date)
 
   return {
     backgroundColor: color[100],
     borderColor,
-    boxShadow: `inset 0 0 0 1px ${borderColor}`,
+    borderRightColor: continuesRight ? 'transparent' : borderColor,
+    boxShadow: shiftRunBoxShadow(employee, date, borderColor),
     color: (colors as any).gray[900],
   }
 }
@@ -1179,15 +1252,15 @@ function projectSegmentStyle(segment: ProjectSegment) {
 }
 
 
-function positionHoverCard(event: MouseEvent) {
-  if (!hoverCard.value) return
+function applyHoverCardPosition(event: MouseEvent) {
+  if (!hoverCard.value || !hoverCardElement.value) return
 
   const padding = 12
   const cursorOffset = 14
   const fallbackCardWidth = 340
   const fallbackCardHeight = hoverCard.value.type === 'project' ? 168 : 240
-  const cardWidth = hoverCardElement.value?.offsetWidth || fallbackCardWidth
-  const cardHeight = hoverCardElement.value?.offsetHeight || fallbackCardHeight
+  const cardWidth = hoverCardElement.value.offsetWidth || fallbackCardWidth
+  const cardHeight = hoverCardElement.value.offsetHeight || fallbackCardHeight
   const maxLeft = Math.max(padding, window.innerWidth - cardWidth - padding)
   const maxTop = Math.max(padding, window.innerHeight - cardHeight - padding)
 
@@ -1201,18 +1274,39 @@ function positionHoverCard(event: MouseEvent) {
     y = event.clientY - cardHeight - cursorOffset
   }
 
-  hoverCard.value = {
-    ...hoverCard.value,
-    x: Math.min(Math.max(padding, x), maxLeft),
-    y: Math.min(Math.max(padding, y), maxTop),
-  }
+  const clampedX = Math.min(Math.max(padding, x), maxLeft)
+  const clampedY = Math.min(Math.max(padding, y), maxTop)
+
+  hoverCardElement.value.style.transform = `translate3d(${clampedX}px, ${clampedY}px, 0)`
+}
+
+function scheduleHoverCardPosition(event: MouseEvent) {
+  if (!hoverCard.value) return
+
+  pendingHoverEvent = event
+  if (hoverPositionFrame) return
+
+  hoverPositionFrame = window.requestAnimationFrame(() => {
+    hoverPositionFrame = 0
+    if (pendingHoverEvent) applyHoverCardPosition(pendingHoverEvent)
+    pendingHoverEvent = null
+  })
+}
+
+function positionHoverCard(event: MouseEvent) {
+  scheduleHoverCardPosition(event)
 }
 
 function moveHoverCard(event: MouseEvent) {
-  positionHoverCard(event)
+  scheduleHoverCardPosition(event)
 }
 
 function clearHoverCard() {
+  if (hoverPositionFrame) {
+    window.cancelAnimationFrame(hoverPositionFrame)
+    hoverPositionFrame = 0
+  }
+  pendingHoverEvent = null
   hoverCard.value = null
 }
 
@@ -1243,8 +1337,6 @@ function showEmployeeHover(employee: Employee, date: string, event: MouseEvent) 
 
   hoverCard.value = {
     type: 'shift',
-    x: event.clientX,
-    y: event.clientY,
     kicker: 'Shift Allocation',
     title: customerLabel || shift.shift_type,
     subtitle: [shift.custom_project_name, shift.shift_location].filter(Boolean).join(' · '),
@@ -1282,16 +1374,16 @@ function showProjectHover(project: ProjectRow, segment: ProjectSegment, event: M
 
   hoverCard.value = {
     type: 'project',
-    x: event.clientX,
-    y: event.clientY,
     kicker: 'Project',
     title: segment.label || project.project_name,
-    subtitle: segment.subline,
+    subtitle: [projectGroupLabel(project), segment.subline].filter(Boolean).join(' · '),
     badge: segment.poEntered ? 'PO Entered' : 'PO Missing',
     badgeTone: segment.poEntered ? 'green' : 'red',
     accent,
     rows: [
       { label: 'Project ID', value: project.project },
+      { label: 'Customer', value: project.customer_name || project.customer },
+      { label: 'Location', value: project.custom_project_location },
       { label: 'Status', value: project.status },
       { label: 'Date Range', value: segment.subline },
       { label: 'DS Requested', value: segment.dsRequested || 0 },
@@ -1477,6 +1569,18 @@ defineExpose({ events, scrollToToday })
 .year-cell {
   font-weight: 600;
   vertical-align: middle;
+}
+
+.year-employee-shift-cell {
+  border-style: solid !important;
+}
+
+.year-employee-shift-continues-left.year-month-start {
+  border-left-color: transparent !important;
+}
+
+.year-employee-shift-continues-right {
+  border-right-color: transparent !important;
 }
 
 .year-project-row td {
@@ -1741,8 +1845,12 @@ defineExpose({ events, scrollToToday })
 
 .year-hover-card {
   position: fixed;
+  left: 0;
+  top: 0;
   z-index: 9999;
   width: 340px;
+  transform: translate3d(-9999px, -9999px, 0);
+  will-change: transform;
   max-width: calc(100vw - 24px);
   pointer-events: none;
   border: 1px solid rgb(209 213 219);

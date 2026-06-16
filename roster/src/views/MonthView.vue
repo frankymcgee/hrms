@@ -1,5 +1,9 @@
 <template>
-  <div class="h-screen overflow-hidden flex flex-col">
+  <div
+    ref="shellRef"
+    class="overflow-hidden flex flex-col"
+    :style="{ height: shellHeight + 'px' }"
+  >
     <!-- Toolbar / Title row -->
     <div ref="toolbarRef" class="px-12 py-8 pb-4">
       <div class="flex items-center">
@@ -79,7 +83,7 @@
     </div>
 
     <!-- Table area fills remaining height -->
-    <div class="px-12 pb-8 flex-1 min-h-0 mt-px">
+    <div ref="tableAreaRef" class="px-12 pb-8 flex-1 min-h-0 mt-px">
       <MonthViewTable
         v-if="isCompanySelected && viewMode === 'month'"
         ref="monthViewTable"
@@ -137,6 +141,8 @@ export type ShiftFilters = {
 type AvailabilityResponse = { employees: { name: string }[] }
 type ViewMode = 'month' | 'year'
 
+const shellRef = ref<HTMLElement | null>(null)
+const tableAreaRef = ref<HTMLElement | null>(null)
 const monthViewTable = ref<InstanceType<typeof MonthViewTable>>()
 const yearViewTable = ref<InstanceType<typeof YearViewTable>>()
 const isCompanySelected = ref(false)
@@ -154,7 +160,9 @@ const timelineRef = ref<HTMLElement | null>(null)
 const toolbarHeight = ref(0)
 const filtersHeight = ref(0)
 const timelineHeight = ref(0)
-const vh = ref(window.innerHeight)
+const shellHeight = ref(window.innerHeight)
+const viewportHeight = ref(window.innerHeight)
+const tableAreaTop = ref(0)
 const projectFilters = reactive<{ company?: string; shifts_filled?: 0 | 1 }>({})
 let roToolbar: ResizeObserver | null = null
 let roFilters: ResizeObserver | null = null
@@ -233,31 +241,41 @@ function updateFilters(newFilters: EmployeeFilters & ShiftFilters) {
   fetchAvailability()
 }
 
-// calculate remaining height for the table scroller
+// Calculate the height available to the employee table area from its actual
+// viewport position. This accounts for the Frappe navbar/top chrome, toolbar,
+// filters, the month-project timeline, and the bottom page padding.
 const tableHeight = computed(() => {
-  const innerBottomPadding = 32
-  const extraShave = 50
+  const bottomPadding = 32
+  const top = tableAreaTop.value
+
+  if (top > 0) {
+    return Math.max(200, viewportHeight.value - top - bottomPadding)
+  }
+
+  // Fallback for the first render before refs are measured.
   const used = toolbarHeight.value + filtersHeight.value + (viewMode.value === 'month' ? timelineHeight.value : 0)
-  const remaining = vh.value - used - innerBottomPadding - extraShave
-  return Math.max(200, remaining)
+  return Math.max(200, shellHeight.value - used - bottomPadding)
 })
 
 function observeHeights() {
   if (toolbarRef.value) {
     roToolbar = new ResizeObserver(() => {
       toolbarHeight.value = toolbarRef.value!.getBoundingClientRect().height
+      window.requestAnimationFrame(updateTableAreaTop)
     })
     roToolbar.observe(toolbarRef.value)
   }
   if (filtersRef.value) {
     roFilters = new ResizeObserver(() => {
       filtersHeight.value = filtersRef.value!.getBoundingClientRect().height
+      window.requestAnimationFrame(updateTableAreaTop)
     })
     roFilters.observe(filtersRef.value)
   }
   if (timelineRef.value) {
     roTimeline = new ResizeObserver(() => {
       timelineHeight.value = timelineRef.value!.getBoundingClientRect().height
+      window.requestAnimationFrame(updateTableAreaTop)
     })
     roTimeline.observe(timelineRef.value)
   }
@@ -269,23 +287,55 @@ function unobserveHeights() {
   roTimeline?.disconnect()
 }
 
+function updateShellHeight() {
+  viewportHeight.value = window.innerHeight
+  const top = shellRef.value?.getBoundingClientRect().top ?? 0
+  shellHeight.value = Math.max(320, viewportHeight.value - top)
+}
+
+function updateTableAreaTop() {
+  tableAreaTop.value = tableAreaRef.value?.getBoundingClientRect().top ?? 0
+}
+
+function updateLayoutMeasurements() {
+  updateShellHeight()
+  updateTableAreaTop()
+}
+
 function onWindowResize() {
-  vh.value = window.innerHeight
+  updateLayoutMeasurements()
 }
 
 onMounted(() => {
   observeHeights()
   window.addEventListener('resize', onWindowResize)
+
+  // The roster is rendered below the Frappe navbar. Using plain h-screen makes
+  // the page taller than the visible area, so measure where this component
+  // starts and subtract that offset from the viewport height.
+  updateLayoutMeasurements()
+  window.requestAnimationFrame(updateLayoutMeasurements)
+
   // initialize once
   toolbarHeight.value = toolbarRef.value?.getBoundingClientRect().height ?? 0
   filtersHeight.value = filtersRef.value?.getBoundingClientRect().height ?? 0
   timelineHeight.value = timelineRef.value?.getBoundingClientRect().height ?? 0
+  updateTableAreaTop()
 })
 
 onBeforeUnmount(() => {
   unobserveHeights()
   window.removeEventListener('resize', onWindowResize)
 })
+
+watch(
+  () => [viewMode.value, firstOfMonth.value?.valueOf?.(), projectsCollapsed.value, isCompanySelected.value],
+  async () => {
+    await nextTick()
+    updateLayoutMeasurements()
+    window.requestAnimationFrame(updateLayoutMeasurements)
+  },
+)
 
 const employees = createListResource({
   doctype: 'Employee',
