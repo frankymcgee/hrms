@@ -9,29 +9,55 @@
   >
     <!-- Annual project / planning view. This is intentionally separate from employees. -->
     <section v-if="projectRows.length" class="year-roster-panel rounded-lg border bg-white">
-      <div class="year-panel-header flex items-center justify-between border-b bg-gray-50 px-3 py-2">
-        <div>
-          <div class="text-sm font-semibold text-gray-800">Projects / Planning</div>
-          <div class="text-xs text-gray-500">Annual project overview. Employees are not grouped under projects.</div>
-        </div>
-        <div class="text-xs text-gray-500">{{ projectRows.length }} rows</div>
-      </div>
-
       <div
         ref="projectScroller"
         class="year-roster-scroller overflow-auto"
         :style="{ maxHeight: projectTableMaxHeight + 'px' }"
         @scroll="onProjectScroll"
       >
-        <table class="year-roster-table border-separate border-spacing-0">
-          <colgroup>
-            <col class="year-left-colgroup" />
-            <col v-for="day in daysOfYear" :key="`project-col-${day.date}`" class="year-day-colgroup" />
-          </colgroup>
+        <div class="year-table-stage">
+          <div
+            v-if="showTodayOverlay"
+            class="year-today-overlay"
+            :style="todayOverlayStyle"
+            aria-hidden="true"
+          />
+
+          <table class="year-roster-table border-separate border-spacing-0">
+            <colgroup>
+              <col class="year-left-colgroup" />
+              <col v-for="day in daysOfYear" :key="`project-col-${day.date}`" class="year-day-colgroup" />
+            </colgroup>
           <thead>
             <tr>
-              <th rowspan="2" class="year-left-header year-left-col border-b border-r bg-white text-left">
-                <div class="px-2 py-1.5 text-xs font-semibold text-gray-700">Project / Planning Row</div>
+              <th rowspan="2" class="year-left-header year-left-col year-project-legend-header border-b border-r bg-white text-left">
+                <div class="year-project-header-content px-2 py-1.5">
+                  <div class="flex items-center gap-1.5 text-xs font-semibold text-gray-800">
+                    <span class="year-project-header-icon">▱</span>
+                    <span>Projects</span>
+                  </div>
+
+                  <div class="mt-1 text-[10px] font-semibold leading-none text-gray-600">Legend</div>
+
+                  <div class="year-project-legend mt-1">
+                    <div class="year-project-legend-item">
+                      <span class="year-legend-icon year-legend-po-entered">✓</span>
+                      <span>PO Entered</span>
+                    </div>
+                    <div class="year-project-legend-item">
+                      <span class="year-legend-icon year-legend-po-missing">×</span>
+                      <span>PO Missing</span>
+                    </div>
+                    <div class="year-project-legend-item">
+                      <span class="year-legend-icon year-legend-ds-requested">☼</span>
+                      <span># DS Requested</span>
+                    </div>
+                    <div class="year-project-legend-item">
+                      <span class="year-legend-icon year-legend-ns-requested">◔</span>
+                      <span># NS Requested</span>
+                    </div>
+                  </div>
+                </div>
               </th>
 
               <th
@@ -51,7 +77,6 @@
                 :class="{
                   'year-month-start': day.isMonthStart,
                   'year-weekend': day.isWeekend,
-                  'year-today': day.isToday,
                 }"
                 :title="dayjs(day.date).format('dddd, DD MMMM YYYY')"
               >
@@ -70,59 +95,104 @@
               </td>
 
               <td
-                v-for="day in daysOfYear"
-                :key="`${project.project_name}-${day.date}`"
+                v-for="segment in projectSegments(project)"
+                :key="segment.key"
                 class="year-cell year-project-cell border-b border-r text-center"
-                :class="[
-                  projectCellClass(project, day.date),
-                  {
-                    'year-month-start': day.isMonthStart,
-                    'year-weekend': day.isWeekend,
-                    'year-today': day.isToday,
-                  },
-                ]"
-                :style="projectCellStyle(project, day.date)"
-                :title="projectCellTitle(project, day.date)"
-              ></td>
+                :class="projectSegmentClass(segment)"
+                :style="projectSegmentStyle(segment)"
+                :title="segment.title"
+                :colspan="segment.days"
+              >
+                <div v-if="segment.active" class="year-project-span-content">
+                  <span
+                    class="year-project-status-icon"
+                    :class="segment.poEntered ? 'year-project-po-entered' : 'year-project-po-missing'"
+                    :title="segment.poEntered ? 'PO Entered' : 'PO Missing'"
+                  >
+                    {{ segment.poEntered ? '✓' : '×' }}
+                  </span>
+
+                  <span class="year-project-span-name truncate">
+                    {{ segment.label }}
+                  </span>
+
+                  <span class="year-project-span-date">
+                    {{ segment.subline }}
+                  </span>
+
+                  <span class="year-project-request year-project-request-ds" title="# DS Requested">☼</span>
+                  <span class="year-project-request-count">{{ segment.dsRequested || 0 }}</span>
+
+                  <span class="year-project-request year-project-request-ns" title="# NS Requested">◔</span>
+                  <span class="year-project-request-count">{{ segment.nsRequested || 0 }}</span>
+                </div>
+              </td>
             </tr>
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
 
     <!-- Annual employee roster view. This scrolls separately from the project table. -->
     <section class="year-roster-panel year-employee-panel flex min-h-0 flex-1 flex-col rounded-lg border bg-white">
-      <div class="year-panel-header flex items-center justify-between gap-4 border-b bg-gray-50 px-3 py-2">
-        <div>
-          <div class="text-sm font-semibold text-gray-800">Employees</div>
-          <div class="text-xs text-gray-500">Annual compact roster grid</div>
-        </div>
-
-        <div class="w-[320px] max-w-full">
-          <Autocomplete
-            :options="employeeSearchOptions"
-            v-model="employeeSearch"
-            placeholder="Search Employee"
-            :multiple="true"
-          />
-        </div>
-      </div>
-
       <div
         ref="employeeScroller"
         class="year-roster-scroller min-h-0 flex-1 overflow-auto"
         :style="{ maxHeight: employeeTableMaxHeight + 'px' }"
         @scroll="onEmployeeScroll"
       >
-        <table class="year-roster-table border-separate border-spacing-0">
-          <colgroup>
-            <col class="year-left-colgroup" />
-            <col v-for="day in daysOfYear" :key="`employee-col-${day.date}`" class="year-day-colgroup" />
-          </colgroup>
+        <div class="year-table-stage">
+          <div
+            v-if="showTodayOverlay"
+            class="year-today-overlay"
+            :style="todayOverlayStyle"
+            aria-hidden="true"
+          />
+
+          <table class="year-roster-table border-separate border-spacing-0">
+            <colgroup>
+              <col class="year-left-colgroup" />
+              <col v-for="day in daysOfYear" :key="`employee-col-${day.date}`" class="year-day-colgroup" />
+            </colgroup>
           <thead>
             <tr>
-              <th rowspan="2" class="year-left-header year-left-col border-b border-r bg-white text-left">
-                <div class="px-2 py-1.5 text-xs font-semibold text-gray-700">Employee</div>
+              <th rowspan="2" class="year-left-header year-left-col year-employee-search-header border-b border-r bg-white text-left">
+                <div class="year-employee-header-content px-2 py-1.5">
+                  <div class="flex items-center gap-2">
+                    <div class="text-xs font-semibold text-gray-700">Employee</div>
+                  </div>
+
+                  <div class="year-employee-search">
+                    <Autocomplete
+                      :options="employeeSearchOptions"
+                      v-model="employeeSearch"
+                      placeholder="Search Employee"
+                      :multiple="true"
+                    />
+                  </div>
+
+                  <div class="year-employee-legend-title">Legend</div>
+
+                  <div class="year-employee-legend">
+                    <div class="year-employee-legend-item">
+                      <span class="year-employee-legend-dot year-employee-legend-fifo"></span>
+                      <span>Fly-in/Fly-out</span>
+                    </div>
+                    <div class="year-employee-legend-item">
+                      <span class="year-employee-legend-dot year-employee-legend-ds"></span>
+                      <span>DS</span>
+                    </div>
+                    <div class="year-employee-legend-item">
+                      <span class="year-employee-legend-dot year-employee-legend-ns"></span>
+                      <span>NS</span>
+                    </div>
+                    <div class="year-employee-legend-item">
+                      <span class="year-employee-legend-dot year-employee-legend-pth"></span>
+                      <span>PTH</span>
+                    </div>
+                  </div>
+                </div>
               </th>
 
               <th
@@ -142,7 +212,6 @@
                 :class="{
                   'year-month-start': day.isMonthStart,
                   'year-weekend': day.isWeekend,
-                  'year-today': day.isToday,
                 }"
                 :title="dayjs(day.date).format('dddd, DD MMMM YYYY')"
               >
@@ -172,7 +241,6 @@
                 :class="{
                   'year-month-start': day.isMonthStart,
                   'year-weekend': day.isWeekend,
-                  'year-today': day.isToday,
                 }"
                 :style="employeeCellStyle(employee.name, day.date)"
                 :title="employeeCellTitle(employee.name, day.date)"
@@ -181,8 +249,9 @@
                 {{ employeeCellLabel(employee.name, day.date) }}
               </td>
             </tr>
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
   </div>
@@ -229,6 +298,7 @@ type Employee = {
   first_name?: string
   last_name?: string
   designation?: string
+  department?: string
   image?: string
 }
 
@@ -256,7 +326,9 @@ type ShiftAssignment = {
   start_time?: string
   end_time?: string
   color?: string
+  custom_project?: string
   custom_project_name?: string
+  customer_abbreviation?: string | null
   note?: string | null
 }
 
@@ -281,6 +353,11 @@ type ProjectDayCell = {
 type ProjectRow = {
   project: string
   project_name: string
+  status?: string
+  po_entered?: boolean
+  ds_requested?: number
+  ns_requested?: number
+  customer_color?: string | null
   assignments: Record<string, ProjectDayCell>
 }
 
@@ -306,6 +383,9 @@ const employeeSearch = ref<{ value: string; label: string }[]>()
 const shiftAssignment = ref<string>('')
 const showShiftAssignmentDialog = ref(false)
 const selectedCell = ref<{ employee: string; date: string }>({ employee: '', date: '' })
+
+const LEFT_COLUMN_WIDTH = 300
+const DAY_COLUMN_WIDTH = 28
 
 let syncingHorizontalScroll = false
 
@@ -379,6 +459,18 @@ const monthGroups = computed(() => {
   return groups
 })
 
+const todayIndex = computed(() => {
+  const today = dayjs().format('YYYY-MM-DD')
+  return daysOfYear.value.findIndex((day) => day.date === today)
+})
+
+const showTodayOverlay = computed(() => todayIndex.value >= 0)
+
+const todayOverlayStyle = computed(() => ({
+  left: `${LEFT_COLUMN_WIDTH + todayIndex.value * DAY_COLUMN_WIDTH}px`,
+  width: `${DAY_COLUMN_WIDTH}px`,
+}))
+
 const employeeSearchOptions = computed(() => {
   return props.employees.map((employee) => ({
     value: employee.name,
@@ -386,10 +478,25 @@ const employeeSearchOptions = computed(() => {
   }))
 })
 
+function naturalCompare(a?: string, b?: string) {
+  return String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' })
+}
+
+function sortEmployeesByDepartmentAndId(employees: Employee[]) {
+  return [...employees].sort((a, b) => {
+    const departmentCompare = naturalCompare(a.department, b.department)
+    if (departmentCompare !== 0) return departmentCompare
+
+    return naturalCompare(a.name, b.name)
+  })
+}
+
+const sortedEmployees = computed(() => sortEmployeesByDepartmentAndId(props.employees || []))
+
 const visibleEmployees = computed(() => {
-  if (!employeeSearch.value?.length) return props.employees
+  if (!employeeSearch.value?.length) return sortedEmployees.value
   const selected = new Set(employeeSearch.value.map((item) => item.value))
-  return props.employees.filter((employee) => selected.has(employee.name))
+  return sortedEmployees.value.filter((employee) => selected.has(employee.name))
 })
 
 const projectRows = computed(() => {
@@ -399,7 +506,33 @@ const projectRows = computed(() => {
 type ProjectSpan = {
   start: string
   end: string
+  startIndex: number
+  days: number
   color?: string
+  customerColor?: string | null
+  employeeCount: number
+  shiftTypes: string[]
+  poEntered: boolean
+  dsRequested: number
+  nsRequested: number
+}
+
+type ProjectSegment = {
+  key: string
+  days: number
+  active: boolean
+  date?: string
+  isMonthStart?: boolean
+  isWeekend?: boolean
+  isToday?: boolean
+  label?: string
+  subline?: string
+  title?: string
+  color?: string
+  customerColor?: string | null
+  poEntered?: boolean
+  dsRequested?: number
+  nsRequested?: number
 }
 
 function projectKey(project: ProjectRow) {
@@ -413,14 +546,38 @@ const projectSpans = computed<Record<string, ProjectSpan>>(() => {
     const dates = Object.keys(project.assignments || {}).sort()
     if (!dates.length) continue
 
-    const firstColour = dates
-      .map((date) => project.assignments?.[date]?.color)
-      .find((color) => !!color)
+    const employeeSet = new Set<string>()
+    const shiftTypeSet = new Set<string>()
+    let largestDailyCount = 0
+
+    for (const date of dates) {
+      const assignment = project.assignments?.[date]
+      largestDailyCount = Math.max(largestDailyCount, Number(assignment?.count || 0))
+
+      for (const employee of assignment?.employees || []) {
+        employeeSet.add(employee)
+      }
+
+      for (const shiftType of assignment?.shift_types || []) {
+        shiftTypeSet.add(shiftType)
+      }
+    }
+
+    const startIndex = daysOfYear.value.findIndex((day) => day.date === dates[0])
+    const endIndex = daysOfYear.value.findIndex((day) => day.date === dates[dates.length - 1])
 
     spans[projectKey(project)] = {
       start: dates[0],
       end: dates[dates.length - 1],
-      color: firstColour || 'green',
+      startIndex: Math.max(0, startIndex),
+      days: Math.max(1, endIndex - startIndex + 1),
+      color: project.po_entered === false ? 'red' : 'green',
+      customerColor: project.customer_color || null,
+      employeeCount: employeeSet.size || largestDailyCount,
+      shiftTypes: Array.from(shiftTypeSet).sort(),
+      poEntered: project.po_entered !== false,
+      dsRequested: Number(project.ds_requested || 0),
+      nsRequested: Number(project.ns_requested || 0),
     }
   }
 
@@ -431,24 +588,92 @@ function projectSpan(project: ProjectRow) {
   return projectSpans.value[projectKey(project)]
 }
 
-function isProjectSpanActive(project: ProjectRow, date: string) {
+function projectSpanSubline(_project: ProjectRow, span: ProjectSpan) {
+  return `${dayjs(span.start).format('DD MMM')} – ${dayjs(span.end).format('DD MMM')}`
+}
+
+function projectSpanTitle(project: ProjectRow, span: ProjectSpan) {
+  return [
+    project.project_name,
+    project.project,
+    project.status,
+    `${dayjs(span.start).format('DD MMM YYYY')} - ${dayjs(span.end).format('DD MMM YYYY')}`,
+    span.poEntered ? 'PO Entered' : 'PO Missing',
+    `${span.dsRequested || 0} DS Requested`,
+    `${span.nsRequested || 0} NS Requested`,
+  ].filter(Boolean).join(' | ')
+}
+
+function projectSegments(project: ProjectRow): ProjectSegment[] {
   const span = projectSpan(project)
-  if (!span) return false
-  return date >= span.start && date <= span.end
+
+  if (!span) {
+    return daysOfYear.value.map((day) => ({
+      key: `${projectKey(project)}-${day.date}`,
+      days: 1,
+      active: false,
+      date: day.date,
+      isMonthStart: day.isMonthStart,
+      isWeekend: day.isWeekend,
+      isToday: day.isToday,
+      title: `${project.project_name} | ${dayjs(day.date).format('DD MMM YYYY')}`,
+    }))
+  }
+
+  const segments: ProjectSegment[] = []
+
+  for (let index = 0; index < daysOfYear.value.length; index++) {
+    const day = daysOfYear.value[index]
+
+    if (index === span.startIndex) {
+      segments.push({
+        key: `${projectKey(project)}-${span.start}-${span.end}`,
+        days: span.days,
+        active: true,
+        date: span.start,
+        isMonthStart: day.isMonthStart,
+        isToday: daysOfYear.value
+          .slice(span.startIndex, span.startIndex + span.days)
+          .some((spanDay) => spanDay.isToday),
+        label: project.project_name,
+        subline: projectSpanSubline(project, span),
+        title: projectSpanTitle(project, span),
+        color: span.color,
+        customerColor: span.customerColor,
+        poEntered: span.poEntered,
+        dsRequested: span.dsRequested,
+        nsRequested: span.nsRequested,
+      })
+      index += span.days - 1
+      continue
+    }
+
+    segments.push({
+      key: `${projectKey(project)}-${day.date}`,
+      days: 1,
+      active: false,
+      date: day.date,
+      isMonthStart: day.isMonthStart,
+      isWeekend: day.isWeekend,
+      isToday: day.isToday,
+      title: `${project.project_name} | ${dayjs(day.date).format('DD MMM YYYY')}`,
+    })
+  }
+
+  return segments
 }
 
 const projectTableMaxHeight = computed(() => {
   const headerHeight = 52
-  const rowHeight = 26
+  const rowHeight = 30
   const naturalHeight = headerHeight + projectRows.value.length * rowHeight
-  return Math.min(220, Math.max(104, naturalHeight))
+  return Math.min(240, Math.max(112, naturalHeight))
 })
 
 const employeeTableMaxHeight = computed(() => {
   const total = props.maxHeightPx || 650
-  const projectPanelUsed = projectRows.value.length ? projectTableMaxHeight.value + 52 + 16 : 0
-  const employeePanelHeader = 52
-  return Math.max(220, total - projectPanelUsed - employeePanelHeader)
+  const projectPanelUsed = projectRows.value.length ? projectTableMaxHeight.value + 16 : 0
+  return Math.max(220, total - projectPanelUsed)
 })
 
 function employeeDisplayName(employee: Employee) {
@@ -493,6 +718,54 @@ function palette(color?: string) {
   return ((colors as any)[key] || (colors as any).gray) as Record<string, string>
 }
 
+function normaliseHexColor(value?: string | null) {
+  if (!value) return ''
+
+  const trimmed = value.trim()
+  if (/^#[0-9a-fA-F]{3}$/.test(trimmed) || /^#[0-9a-fA-F]{6}$/.test(trimmed)) return trimmed
+  if (/^[0-9a-fA-F]{3}$/.test(trimmed) || /^[0-9a-fA-F]{6}$/.test(trimmed)) return `#${trimmed}`
+
+  return ''
+}
+
+function hexToRgb(hex: string) {
+  const normalized = normaliseHexColor(hex)
+  if (!normalized) return null
+
+  const raw = normalized.slice(1)
+  const expanded = raw.length === 3 ? raw.split('').map((char) => char + char).join('') : raw
+  const numeric = Number.parseInt(expanded, 16)
+
+  return {
+    r: (numeric >> 16) & 255,
+    g: (numeric >> 8) & 255,
+    b: numeric & 255,
+  }
+}
+
+function contrastTextColor(hex: string) {
+  const rgb = hexToRgb(hex)
+  if (!rgb) return (colors as any).gray[800]
+
+  const brightness = (rgb.r * 299 + rgb.g * 587 + rgb.b * 114) / 1000
+  return brightness >= 150 ? (colors as any).gray[900] : '#ffffff'
+}
+
+function mutedContrastTextColor(hex: string) {
+  const textColor = contrastTextColor(hex)
+  return textColor === '#ffffff' ? 'rgb(255 255 255 / 0.82)' : 'rgb(55 65 81 / 0.78)'
+}
+
+function darkenHexColor(hex: string, amount = 0.28) {
+  const rgb = hexToRgb(hex)
+  if (!rgb) return normaliseHexColor(hex)
+
+  const clamp = (value: number) => Math.max(0, Math.min(255, Math.round(value)))
+  const toHex = (value: number) => clamp(value).toString(16).padStart(2, '0')
+
+  return `#${toHex(rgb.r * (1 - amount))}${toHex(rgb.g * (1 - amount))}${toHex(rgb.b * (1 - amount))}`
+}
+
 function formatShift(shift: ShiftAssignment): ShiftAssignment {
   return {
     ...shift,
@@ -500,6 +773,20 @@ function formatShift(shift: ShiftAssignment): ShiftAssignment {
     start_time: shift.start_time ? dayjs(shift.start_time, 'hh:mm:ss').format('HH:mm') : '',
     end_time: shift.end_time ? dayjs(shift.end_time, 'hh:mm:ss').format('HH:mm') : '',
   }
+}
+
+function shiftCellLabel(shift: ShiftAssignment) {
+  const customerAbbreviation = shift.customer_abbreviation?.trim()
+
+  if (customerAbbreviation) return customerAbbreviation
+
+  // Project-linked shifts should not fall back to the full project name in the
+  // compact annual cells. If the Project is missing customer_abbreviation, leave
+  // the annual cell blank so the missing abbreviation is obvious.
+  if (shift.custom_project) return ''
+
+  // Non-project shift assignments can still show their shift type.
+  return shift.shift_type
 }
 
 function hasNote(note: string | null | undefined) {
@@ -549,12 +836,14 @@ function mapEventsToYear(data: Events): MappedEvents {
       if (shifts.length) {
         shifts.sort((a, b) => (a.start_time || '').localeCompare(b.start_time || ''))
         const firstShift = shifts[0]
+        const firstShiftLabel = shiftCellLabel(firstShift)
         mappedEvents[employee][day.date] = {
           type: 'shift',
-          label: shifts.length > 1 ? `${firstShift.shift_type}+` : firstShift.shift_type,
+          label: shifts.length > 1 && firstShiftLabel ? `${firstShiftLabel}+` : firstShiftLabel,
           title: [
-            firstShift.shift_type,
+            firstShift.customer_abbreviation ? `Customer: ${firstShift.customer_abbreviation}` : '',
             firstShift.custom_project_name,
+            firstShift.shift_type,
             firstShift.shift_location,
             firstShift.note ? `Note: ${firstShift.note}` : '',
           ].filter(Boolean).join(' | '),
@@ -593,9 +882,12 @@ function employeeCellStyle(employee: string, date: string) {
   }
 
   const color = palette(cell.shift.color)
+  const borderColor = hasNote(cell.shift.note) ? (colors as any).red[500] : color[300]
+
   return {
     backgroundColor: color[100],
-    borderColor: hasNote(cell.shift.note) ? (colors as any).red[500] : color[300],
+    borderColor,
+    boxShadow: `inset 0 0 0 1px ${borderColor}`,
     color: (colors as any).gray[900],
   }
 }
@@ -609,51 +901,46 @@ function openEmployeeCell(employee: string, date: string) {
   showShiftAssignmentDialog.value = true
 }
 
-function projectCellClass(project: ProjectRow, date: string) {
-  const span = projectSpan(project)
-  if (!span || !isProjectSpanActive(project, date)) return ''
-
+function projectSegmentClass(segment: ProjectSegment) {
   return {
-    'year-project-span': true,
-    'year-project-span-start': date === span.start,
-    'year-project-span-end': date === span.end,
+    'year-project-span': segment.active,
+    'year-month-start': segment.isMonthStart,
+    'year-weekend': segment.isWeekend && !segment.active,
   }
 }
 
-function projectCellTitle(project: ProjectRow, date: string) {
-  const span = projectSpan(project)
-  if (!span || !isProjectSpanActive(project, date)) {
-    return `${project.project_name} | ${dayjs(date).format('DD MMM YYYY')}`
+function projectSegmentStyle(segment: ProjectSegment) {
+  if (!segment.active) return {}
+
+  const customerColor = normaliseHexColor(segment.customerColor)
+  if (customerColor) {
+    const borderColor = darkenHexColor(customerColor)
+    return {
+      backgroundColor: customerColor,
+      borderColor,
+      boxShadow: `inset 0 0 0 1px ${borderColor}`,
+      color: contrastTextColor(customerColor),
+      '--year-project-span-text': contrastTextColor(customerColor),
+      '--year-project-span-muted': mutedContrastTextColor(customerColor),
+    }
   }
 
-  return [
-    project.project_name,
-    `${dayjs(span.start).format('DD MMM YYYY')} - ${dayjs(span.end).format('DD MMM YYYY')}`,
-  ].filter(Boolean).join(' | ')
-}
-
-function projectCellStyle(project: ProjectRow, date: string) {
-  const span = projectSpan(project)
-  if (!span || !isProjectSpanActive(project, date)) return {}
-
-  const color = palette(span.color)
+  const color = palette(segment.poEntered === false ? 'red' : 'green')
   return {
-    backgroundColor: color[100],
-    borderLeftColor: color[100],
-    borderRightColor: color[100],
+    backgroundColor: color[50],
+    borderColor: color[300],
     color: (colors as any).gray[800],
   }
 }
 
 function scrollToToday() {
   const today = dayjs().format('YYYY-MM-DD')
-  const todayIndex = daysOfYear.value.findIndex((day) => day.date === today)
+  const targetTodayIndex = daysOfYear.value.findIndex((day) => day.date === today)
 
-  if (todayIndex < 0) return false
+  if (targetTodayIndex < 0) return false
 
-  const dayWidth = 28
-  const leftOffset = 4 * dayWidth
-  const targetLeft = Math.max(0, todayIndex * dayWidth - leftOffset)
+  const leftOffset = 4 * DAY_COLUMN_WIDTH
+  const targetLeft = Math.max(0, targetTodayIndex * DAY_COLUMN_WIDTH - leftOffset)
 
   if (projectScroller.value) projectScroller.value.scrollLeft = targetLeft
   if (employeeScroller.value) employeeScroller.value.scrollLeft = targetLeft
@@ -700,6 +987,25 @@ defineExpose({ events, scrollToToday })
 </script>
 
 <style scoped>
+.year-table-stage {
+  position: relative;
+  display: inline-block;
+  width: max-content;
+  min-width: max-content;
+}
+
+.year-today-overlay {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: transparent;
+  border-left: 2px solid rgb(31 41 55);
+  border-right: 2px solid rgb(31 41 55);
+  box-sizing: border-box;
+}
+
 .year-roster-table {
   table-layout: fixed;
   width: max-content;
@@ -736,26 +1042,26 @@ defineExpose({ events, scrollToToday })
 .year-left-header {
   position: sticky;
   left: 0;
-  z-index: 3;
+  z-index: 10;
 }
 
 .year-left-header {
   top: 0;
   height: 52px;
-  z-index: 5;
+  z-index: 20;
 }
 
 .year-month-header {
   position: sticky;
   top: 0;
-  z-index: 2;
+  z-index: 6;
   height: 24px;
 }
 
 .year-day-header {
   position: sticky;
   top: 24px;
-  z-index: 2;
+  z-index: 6;
   height: 28px;
 }
 
@@ -764,21 +1070,96 @@ defineExpose({ events, scrollToToday })
   vertical-align: middle;
 }
 
+.year-project-row td {
+  height: 30px;
+}
+
 .year-project-cell {
-  font-size: 0;
+  vertical-align: middle;
 }
 
 .year-project-span {
-  border-right-color: transparent !important;
-  border-left-color: transparent !important;
+  padding: 2px 8px !important;
+  border-width: 1px !important;
+  border-style: solid !important;
+  border-radius: 6px;
 }
 
-.year-project-span-start {
-  border-left-color: rgb(156 163 175) !important;
+.year-project-span-content {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  overflow: hidden;
+  text-align: left;
+  white-space: nowrap;
 }
 
-.year-project-span-end {
-  border-right-color: rgb(156 163 175) !important;
+.year-project-status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  min-width: 13px;
+  height: 13px;
+  border-radius: 9999px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.year-project-po-entered {
+  color: rgb(22 163 74);
+}
+
+.year-project-po-missing {
+  color: rgb(239 68 68);
+}
+
+.year-project-span-name {
+  min-width: 0;
+  max-width: 58%;
+  color: var(--year-project-span-text, rgb(31 41 55));
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.year-project-span-date {
+  min-width: max-content;
+  color: var(--year-project-span-muted, rgb(107 114 128));
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.year-project-request {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  min-width: 13px;
+  height: 13px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.year-project-request-ds {
+  color: rgb(249 115 22);
+}
+
+.year-project-request-ns {
+  color: rgb(14 165 233);
+}
+
+.year-project-request-count {
+  min-width: max-content;
+  color: var(--year-project-span-muted, rgb(55 65 81));
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
 }
 
 .year-cell:hover {
@@ -795,14 +1176,157 @@ defineExpose({ events, scrollToToday })
   border-left-color: rgb(156 163 175) !important;
 }
 
-.year-today {
-  box-shadow: inset 0 0 0 2px rgb(37 99 235 / 0.45);
-}
 
 .year-dialog-open .year-left-col,
 .year-dialog-open .year-left-header,
 .year-dialog-open .year-month-header,
-.year-dialog-open .year-day-header {
+.year-dialog-open .year-day-header,
+.year-dialog-open .year-today-overlay {
   z-index: 0 !important;
 }
+
+.year-employee-search-header {
+  height: 86px;
+  vertical-align: top;
+}
+
+.year-employee-header-content {
+  display: flex;
+  min-height: 86px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+}
+
+.year-employee-search {
+  width: 100%;
+  max-width: 100%;
+  line-height: normal;
+}
+
+.year-employee-search :deep(input),
+.year-employee-search :deep(.input),
+.year-employee-search :deep(.form-control) {
+  min-height: 26px;
+  height: 26px;
+  font-size: 11px;
+}
+
+.year-employee-legend-title {
+  margin-top: 1px;
+  color: rgb(107 114 128);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.year-employee-legend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 8px;
+}
+
+.year-employee-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  color: rgb(107 114 128);
+  font-size: 9px;
+  line-height: 1.05;
+  white-space: nowrap;
+}
+
+.year-employee-legend-dot {
+  display: inline-block;
+  width: 9px;
+  min-width: 9px;
+  height: 9px;
+  border-radius: 9999px;
+  border: 1px solid rgb(107 114 128 / 0.4);
+}
+
+.year-employee-legend-fifo {
+  background: rgb(250 204 21);
+}
+
+.year-employee-legend-ds {
+  background: rgb(34 197 94);
+}
+
+.year-employee-legend-ns {
+  background: rgb(59 130 246);
+}
+
+.year-employee-legend-pth {
+  background: rgb(168 85 247);
+}
+
+
+.year-project-legend-header {
+  height: 74px;
+  vertical-align: top;
+}
+
+.year-project-header-content {
+  line-height: 1.1;
+}
+
+.year-project-header-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: rgb(107 114 128);
+  font-size: 12px;
+}
+
+.year-project-legend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 8px;
+}
+
+.year-project-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  color: rgb(107 114 128);
+  font-size: 9px;
+  line-height: 1.05;
+  white-space: nowrap;
+}
+
+.year-legend-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 11px;
+  min-width: 11px;
+  height: 11px;
+  border-radius: 9999px;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.year-legend-po-entered {
+  color: rgb(34 197 94);
+}
+
+.year-legend-po-missing {
+  color: rgb(239 68 68);
+}
+
+.year-legend-ds-requested {
+  color: rgb(249 115 22);
+}
+
+.year-legend-ns-requested {
+  color: rgb(14 165 233);
+}
+
 </style>

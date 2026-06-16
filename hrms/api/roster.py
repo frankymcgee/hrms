@@ -346,6 +346,7 @@ def get_shift_rows(
 	ShiftAssignment = frappe.qb.DocType("Shift Assignment")
 	ShiftType = frappe.qb.DocType("Shift Type")
 	Employee = frappe.qb.DocType("Employee")
+	Project = frappe.qb.DocType("Project")
 
 	query = (
 		frappe.qb.select(
@@ -363,12 +364,15 @@ def get_shift_rows(
 			ShiftType.start_time,
 			ShiftType.end_time,
 			ShiftType.color,
+			Project.customer_abbreviation.as_("customer_abbreviation"),
 		)
 		.from_(ShiftAssignment)
 		.left_join(ShiftType)
 		.on(ShiftAssignment.shift_type == ShiftType.name)
 		.left_join(Employee)
 		.on(ShiftAssignment.employee == Employee.name)
+		.left_join(Project)
+		.on(ShiftAssignment.custom_project == Project.name)
 		.where(
 			(ShiftAssignment.docstatus == 1)
 			& (ShiftAssignment.start_date <= month_end)
@@ -385,12 +389,39 @@ def get_shift_rows(
 	return query.run(as_dict=True)
 
 
+def _first_existing_project_field(candidates: list[str]) -> str | None:
+	meta = frappe.get_meta("Project")
+	for field in candidates:
+		if meta.has_field(field):
+			return field
+	return None
+
+
+def _truthy_project_value(value) -> bool:
+	if value in (None, ""):
+		return False
+	if isinstance(value, str):
+		return value.strip().lower() not in ("0", "no", "false", "missing", "not entered", "none")
+	return bool(value)
+
+
+def _safe_int(value) -> int:
+	try:
+		return int(value or 0)
+	except (TypeError, ValueError):
+		return 0
+
+
 def get_active_project_meta(project_names: list[str] | set[str]) -> dict[str, dict]:
 	"""Return Project metadata for projects that should appear in annual planning rows.
 
 	The annual project/planning table should only show active/open projects.
 	Employee rows are intentionally left unchanged so historical/assigned shifts still
 	appear for employees if they exist in the selected year.
+
+	The annual project bar mirrors the monthly project timeline. The optional PO/DS/NS
+	fields are detected defensively so this method still works if those custom fields
+	do not exist on a particular site.
 	"""
 	project_names = sorted({project for project in project_names if project})
 	if not project_names:
@@ -404,14 +435,87 @@ def get_active_project_meta(project_names: list[str] | set[str]) -> dict[str, di
 		"Inactive",
 	]
 
+	po_field = _first_existing_project_field([
+		"custom_po_entered",
+		"custom_purchase_order_entered",
+		"custom_purchase_order",
+		"custom_purchase_order_number",
+		"purchase_order",
+		"purchase_order_number",
+		"po_number",
+		"po_no",
+	])
+	ds_field = _first_existing_project_field([
+		"ds_number",
+		"custom_ds_number",
+		"custom_ds_requested",
+		"custom_day_shift_requested",
+		"custom_day_shifts_requested",
+		"ds_requested",
+		"day_shift_requested",
+		"day_shifts_requested",
+	])
+	ns_field = _first_existing_project_field([
+		"ns_number",
+		"custom_ns_number",
+		"custom_ns_requested",
+		"custom_night_shift_requested",
+		"custom_night_shifts_requested",
+		"ns_requested",
+		"night_shift_requested",
+		"night_shifts_requested",
+	])
+
+	customer_abbreviation_field = _first_existing_project_field(["customer_abbreviation"])
+	customer_field = _first_existing_project_field(["customer"])
+	optional_fields = [
+		field
+		for field in [po_field, ds_field, ns_field, customer_abbreviation_field, customer_field]
+		if field
+	]
+
 	projects = frappe.get_all(
 		"Project",
 		filters={
 			"name": ["in", project_names],
 			"status": ["not in", inactive_statuses],
 		},
-		fields=["name", "project_name", "status"],
+		fields=["name", "project_name", "status", *optional_fields],
 	)
+
+	customer_colors = {}
+	if customer_field:
+		customer_color_field = None
+		try:
+			customer_meta = frappe.get_meta("Customer")
+			if customer_meta.has_field("customer_color"):
+				customer_color_field = "customer_color"
+		except Exception:
+			customer_color_field = None
+
+		if customer_color_field:
+			customer_names = sorted(
+				{project.get(customer_field) for project in projects if project.get(customer_field)}
+			)
+			if customer_names:
+				customer_colors = {
+					customer.name: customer.get(customer_color_field)
+					for customer in frappe.get_all(
+						"Customer",
+						filters={"name": ["in", customer_names]},
+						fields=["name", customer_color_field],
+					)
+				}
+
+	for project in projects:
+		# If no PO field exists on this site yet, default to entered so the annual
+		# bar uses the same visual style as the current monthly project timeline.
+		project["po_entered"] = True if not po_field else _truthy_project_value(project.get(po_field))
+		project["ds_requested"] = _safe_int(project.get(ds_field)) if ds_field else 0
+		project["ns_requested"] = _safe_int(project.get(ns_field)) if ns_field else 0
+		project["customer_color"] = (
+			customer_colors.get(project.get(customer_field)) if customer_field else None
+		)
 
 	return {project.name: project for project in projects}
 
@@ -445,6 +549,10 @@ def get_year_project_rows(shift_rows: list[dict], year_start: str, year_end: str
 				"project": project,
 				"project_name": project_name,
 				"status": project_meta.get("status"),
+				"po_entered": project_meta.get("po_entered"),
+				"ds_requested": _safe_int(project_meta.get("ds_requested")),
+				"ns_requested": _safe_int(project_meta.get("ns_requested")),
+				"customer_color": project_meta.get("customer_color"),
 				"assignments": {},
 			}
 

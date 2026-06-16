@@ -289,7 +289,7 @@ onBeforeUnmount(() => {
 
 const employees = createListResource({
   doctype: 'Employee',
-  fields: ['name', 'employee_name', 'first_name', 'last_name', 'designation', 'image'],
+  fields: ['name', 'employee_name', 'first_name', 'last_name', 'department', 'designation', 'image'],
   filters: employeeFilters,
   pageLength: 99999,
   onSuccess() {
