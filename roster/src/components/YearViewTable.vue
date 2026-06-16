@@ -39,7 +39,7 @@
                     </div>
 
                     <button
-                      v-if="projectRows.length"
+                      v-if="projectLanes.length"
                       type="button"
                       class="year-section-toggle year-section-inline-toggle"
                       :class="projectCollapsed && 'year-section-toggle-inactive'"
@@ -100,22 +100,27 @@
           </thead>
 
           <tbody v-show="showProjectBody">
-            <tr v-for="project in projectRows" :key="project.project_name" class="year-project-row">
+            <tr v-for="lane in projectLanes" :key="lane.key" class="year-project-row">
               <td class="year-left-col border-b border-r bg-white">
-                <div class="truncate px-2 text-xs font-medium text-gray-700" :title="project.project_name">
-                  {{ project.project_name }}
+                <div class="px-2 leading-tight">
+                  <div class="truncate text-xs font-semibold text-gray-800" :title="lane.customerLabel">
+                    {{ lane.customerLabel }}
+                  </div>
+                  <div class="truncate text-[10px] text-gray-500" :title="projectLaneSubline(lane)">
+                    {{ projectLaneSubline(lane) }}
+                  </div>
                 </div>
               </td>
 
               <td
-                v-for="segment in projectSegments(project)"
+                v-for="segment in projectLaneSegments(lane)"
                 :key="segment.key"
                 class="year-cell year-project-cell border-b border-r text-center"
                 :class="projectSegmentClass(segment)"
                 :style="projectSegmentStyle(segment)"
                 :aria-label="segment.title"
                 :colspan="segment.days"
-                @mouseenter="showProjectHover(project, segment, $event)"
+                @mouseenter="segment.project ? showProjectHover(segment.project, segment, $event) : clearHoverCard()"
                 @mousemove="moveHoverCard"
                 @mouseleave="clearHoverCard"
               >
@@ -428,6 +433,8 @@ type ProjectRow = {
   project: string
   project_name: string
   status?: string
+  customer?: string | null
+  customer_name?: string | null
   po_entered?: boolean
   ds_requested?: number
   ns_requested?: number
@@ -607,27 +614,12 @@ const projectRows = computed(() => {
   return (events.data?.projectRows || []) as ProjectRow[]
 })
 
-const showProjectsPanel = computed(() => projectRows.value.length > 0)
-const showEmployeesPanel = computed(() => true)
-const showProjectBody = computed(() => projectRows.value.length > 0 && !projectCollapsed.value)
-const showEmployeeBody = computed(() => !employeeCollapsed.value)
-
-function toggleProjectCollapsed() {
-  if (!projectCollapsed.value && employeeCollapsed.value) {
-    raiseToast('error', 'At least one annual roster section must remain visible')
-    return
-  }
-
-  projectCollapsed.value = !projectCollapsed.value
-}
-
-function toggleEmployeeCollapsed() {
-  if (!employeeCollapsed.value && (projectCollapsed.value || !projectRows.value.length)) {
-    raiseToast('error', 'At least one annual roster section must remain visible')
-    return
-  }
-
-  employeeCollapsed.value = !employeeCollapsed.value
+type ProjectLane = {
+  key: string
+  customerKey: string
+  customerLabel: string
+  laneIndex: number
+  projects: ProjectRow[]
 }
 
 type ProjectSpan = {
@@ -648,6 +640,7 @@ type ProjectSegment = {
   key: string
   days: number
   active: boolean
+  project?: ProjectRow
   date?: string
   isMonthStart?: boolean
   isWeekend?: boolean
@@ -731,32 +724,114 @@ function projectSpanTitle(project: ProjectRow, span: ProjectSpan) {
   ].filter(Boolean).join(' | ')
 }
 
-function projectSegments(project: ProjectRow): ProjectSegment[] {
-  const span = projectSpan(project)
+function projectCustomerKey(project: ProjectRow) {
+  return project.customer || project.customer_name || 'Unassigned Customer'
+}
 
-  if (!span) {
-    return daysOfYear.value.map((day) => ({
-      key: `${projectKey(project)}-${day.date}`,
-      days: 1,
-      active: false,
-      date: day.date,
-      isMonthStart: day.isMonthStart,
-      isWeekend: day.isWeekend,
-      isToday: day.isToday,
-      title: `${project.project_name} | ${dayjs(day.date).format('DD MMM YYYY')}`,
-    }))
+function projectCustomerLabel(project: ProjectRow) {
+  return project.customer_name || project.customer || 'Unassigned Customer'
+}
+
+function projectSpanEndIndex(span: ProjectSpan) {
+  return span.startIndex + span.days - 1
+}
+
+const projectLanes = computed<ProjectLane[]>(() => {
+  const grouped = new Map<string, { label: string; projects: ProjectRow[] }>()
+
+  for (const project of projectRows.value) {
+    const span = projectSpan(project)
+    if (!span) continue
+
+    const customerKey = projectCustomerKey(project)
+    const existing = grouped.get(customerKey)
+    if (existing) {
+      existing.projects.push(project)
+    } else {
+      grouped.set(customerKey, {
+        label: projectCustomerLabel(project),
+        projects: [project],
+      })
+    }
+  }
+
+  const lanes: ProjectLane[] = []
+  const sortedGroups = Array.from(grouped.entries()).sort((a, b) => naturalCompare(a[1].label, b[1].label))
+
+  for (const [customerKey, group] of sortedGroups) {
+    const customerLanes: ProjectRow[][] = []
+    const laneEndIndexes: number[] = []
+    const sortedProjects = [...group.projects].sort((a, b) => {
+      const aSpan = projectSpan(a)
+      const bSpan = projectSpan(b)
+      const startCompare = (aSpan?.startIndex ?? 0) - (bSpan?.startIndex ?? 0)
+      if (startCompare !== 0) return startCompare
+      return naturalCompare(a.project_name, b.project_name)
+    })
+
+    for (const project of sortedProjects) {
+      const span = projectSpan(project)
+      if (!span) continue
+
+      let laneIndex = customerLanes.findIndex((_, index) => span.startIndex > laneEndIndexes[index])
+      if (laneIndex < 0) {
+        laneIndex = customerLanes.length
+        customerLanes.push([])
+        laneEndIndexes.push(-1)
+      }
+
+      customerLanes[laneIndex].push(project)
+      laneEndIndexes[laneIndex] = Math.max(laneEndIndexes[laneIndex], projectSpanEndIndex(span))
+    }
+
+    customerLanes.forEach((laneProjects, laneIndex) => {
+      lanes.push({
+        key: `${customerKey}-${laneIndex}`,
+        customerKey,
+        customerLabel: group.label,
+        laneIndex,
+        projects: laneProjects,
+      })
+    })
+  }
+
+  return lanes
+})
+
+function projectLaneSubline(lane: ProjectLane) {
+  const projectCount = lane.projects.length
+  const laneCount = projectLanes.value.filter((item) => item.customerKey === lane.customerKey).length
+  const pieces = [`${projectCount} project${projectCount === 1 ? '' : 's'}`]
+
+  if (laneCount > 1) {
+    pieces.push(`row ${lane.laneIndex + 1} of ${laneCount}`)
+  }
+
+  return pieces.join(' · ')
+}
+
+function projectLaneSegments(lane: ProjectLane): ProjectSegment[] {
+  const byStartIndex = new Map<number, ProjectRow>()
+
+  for (const project of lane.projects) {
+    const span = projectSpan(project)
+    if (!span) continue
+    byStartIndex.set(span.startIndex, project)
   }
 
   const segments: ProjectSegment[] = []
 
   for (let index = 0; index < daysOfYear.value.length; index++) {
     const day = daysOfYear.value[index]
+    const project = byStartIndex.get(index)
+    const span = project ? projectSpan(project) : undefined
 
-    if (index === span.startIndex) {
+    if (project && span) {
       segments.push({
-        key: `${projectKey(project)}-${span.start}-${span.end}`,
+        key: `${lane.key}-${projectKey(project)}-${span.start}-${span.end}`,
         days: span.days,
         active: true,
+        project,
         date: span.start,
         isMonthStart: day.isMonthStart,
         isToday: daysOfYear.value
@@ -776,18 +851,41 @@ function projectSegments(project: ProjectRow): ProjectSegment[] {
     }
 
     segments.push({
-      key: `${projectKey(project)}-${day.date}`,
+      key: `${lane.key}-${day.date}`,
       days: 1,
       active: false,
       date: day.date,
       isMonthStart: day.isMonthStart,
       isWeekend: day.isWeekend,
       isToday: day.isToday,
-      title: `${project.project_name} | ${dayjs(day.date).format('DD MMM YYYY')}`,
+      title: `${lane.customerLabel} | ${dayjs(day.date).format('DD MMM YYYY')}`,
     })
   }
 
   return segments
+}
+
+const showProjectsPanel = computed(() => projectLanes.value.length > 0)
+const showEmployeesPanel = computed(() => true)
+const showProjectBody = computed(() => projectLanes.value.length > 0 && !projectCollapsed.value)
+const showEmployeeBody = computed(() => !employeeCollapsed.value)
+
+function toggleProjectCollapsed() {
+  if (!projectCollapsed.value && employeeCollapsed.value) {
+    raiseToast('error', 'At least one annual roster section must remain visible')
+    return
+  }
+
+  projectCollapsed.value = !projectCollapsed.value
+}
+
+function toggleEmployeeCollapsed() {
+  if (!employeeCollapsed.value && (projectCollapsed.value || !projectLanes.value.length)) {
+    raiseToast('error', 'At least one annual roster section must remain visible')
+    return
+  }
+
+  employeeCollapsed.value = !employeeCollapsed.value
 }
 
 const sectionGap = 16
@@ -809,7 +907,7 @@ const projectTableMaxHeight = computed(() => {
 
   const headerHeight = 52
   const rowHeight = 30
-  const naturalHeight = headerHeight + projectRows.value.length * rowHeight
+  const naturalHeight = headerHeight + projectLanes.value.length * rowHeight
   return Math.min(240, Math.max(112, naturalHeight))
 })
 
@@ -1243,7 +1341,7 @@ const events = createResource({
   transform(data: YearEventsResponse) {
     return {
       mappedEvents: mapEventsToYear(data?.events || {}),
-      projectRows: (data?.project_rows || []).sort((a, b) => a.project_name.localeCompare(b.project_name)),
+      projectRows: (data?.project_rows || []).sort((a, b) => naturalCompare(a.customer_name || a.customer || '', b.customer_name || b.customer || '') || naturalCompare(a.project_name, b.project_name)),
     }
   },
   onSuccess() {

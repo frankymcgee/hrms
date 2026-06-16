@@ -9,6 +9,9 @@ from hrms.hr.doctype.shift_assignment_tool.shift_assignment_tool import create_s
 from hrms.hr.doctype.shift_schedule.shift_schedule import get_or_insert_shift_schedule
 
 
+ANNUAL_ROSTER_RESULT_LIMIT = 1000
+
+
 @frappe.whitelist()
 def get_default_company() -> str:
 	return frappe.defaults.get_user_default("Company")
@@ -287,7 +290,13 @@ def get_holidays(month_start: str, month_end: str, employee_filters: dict[str, s
 	holidays = {}
 	holiday_lists = {}
 
-	for employee in frappe.get_list("Employee", filters=employee_filters, pluck="name"):
+	for employee in frappe.get_list(
+		"Employee",
+		filters=employee_filters,
+		pluck="name",
+		limit_start=0,
+		limit_page_length=ANNUAL_ROSTER_RESULT_LIMIT,
+	):
 		if not (holiday_list := get_holiday_list_for_employee(employee, raise_exception=False)):
 			continue
 		if holiday_list not in holiday_lists:
@@ -412,20 +421,76 @@ def _safe_int(value) -> int:
 		return 0
 
 
-def get_active_project_meta(project_names: list[str] | set[str]) -> dict[str, dict]:
+def _project_date_field(candidates: list[str]) -> str | None:
+	return _first_existing_project_field(candidates)
+
+
+def _safe_project_date(value):
+	if not value:
+		return None
+	try:
+		return getdate(value)
+	except Exception:
+		return None
+
+
+def _project_overlaps_year(project: dict, year_start_date, year_end_date, start_field: str | None, end_field: str | None) -> bool:
+	start_date = _safe_project_date(project.get(start_field)) if start_field else None
+	end_date = _safe_project_date(project.get(end_field)) if end_field else None
+
+	# If a Project has no date range, do not include it just because it is active.
+	# Projects with roster allocations are still included later through the shift fallback.
+	if not start_date and not end_date:
+		return False
+
+	if not start_date:
+		start_date = year_start_date
+	if not end_date:
+		end_date = year_end_date
+
+	return start_date <= year_end_date and end_date >= year_start_date
+
+
+def _project_bounds_for_year(project: dict, year_start_date, year_end_date, start_field: str | None, end_field: str | None, fallback_bounds: dict | None = None):
+	start_date = _safe_project_date(project.get(start_field)) if start_field else None
+	end_date = _safe_project_date(project.get(end_field)) if end_field else None
+
+	if fallback_bounds:
+		start_date = start_date or fallback_bounds.get("start")
+		end_date = end_date or fallback_bounds.get("end")
+
+	if not start_date and not end_date:
+		return None
+
+	if not start_date:
+		start_date = year_start_date
+	if not end_date:
+		end_date = year_end_date
+
+	if start_date > year_end_date or end_date < year_start_date:
+		return None
+
+	return max(start_date, year_start_date), min(end_date, year_end_date)
+
+
+def get_active_project_meta(
+	project_names: list[str] | set[str] | None = None,
+	year_start: str | None = None,
+	year_end: str | None = None,
+) -> dict[str, dict]:
 	"""Return Project metadata for projects that should appear in annual planning rows.
 
-	The annual project/planning table should only show active/open projects.
-	Employee rows are intentionally left unchanged so historical/assigned shifts still
-	appear for employees if they exist in the selected year.
+	When a year range is supplied, this intentionally looks up active Projects by
+	Project date range as well as projects referenced by Shift Assignment rows. This
+	means the annual Projects table can show every active project in that year, not
+	only the projects that already have people allocated to shifts.
 
-	The annual project bar mirrors the monthly project timeline. The optional PO/DS/NS
-	fields are detected defensively so this method still works if those custom fields
-	do not exist on a particular site.
+	ANNUAL_ROSTER_RESULT_LIMIT is deliberately explicit because some Frappe list
+	queries otherwise fall back to the default page length of about 20 rows.
 	"""
-	project_names = sorted({project for project in project_names if project})
-	if not project_names:
-		return {}
+	project_names = sorted({project for project in (project_names or []) if project})
+	year_start_date = getdate(year_start) if year_start else None
+	year_end_date = getdate(year_end) if year_end else None
 
 	inactive_statuses = [
 		"Completed",
@@ -468,93 +533,167 @@ def get_active_project_meta(project_names: list[str] | set[str]) -> dict[str, di
 
 	customer_abbreviation_field = _first_existing_project_field(["customer_abbreviation"])
 	customer_field = _first_existing_project_field(["customer"])
+	start_field = _project_date_field([
+		"expected_start_date",
+		"custom_expected_start_date",
+		"start_date",
+		"custom_start_date",
+		"planned_start_date",
+		"custom_planned_start_date",
+	])
+	end_field = _project_date_field([
+		"expected_end_date",
+		"custom_expected_end_date",
+		"end_date",
+		"custom_end_date",
+		"planned_end_date",
+		"custom_planned_end_date",
+	])
+
 	optional_fields = [
 		field
-		for field in [po_field, ds_field, ns_field, customer_abbreviation_field, customer_field]
+		for field in [
+			po_field,
+			ds_field,
+			ns_field,
+			customer_abbreviation_field,
+			customer_field,
+			start_field,
+			end_field,
+		]
 		if field
 	]
 
+	base_filters = {
+		"status": ["not in", inactive_statuses],
+	}
+
+	project_filters = dict(base_filters)
+	if project_names and not (year_start_date and year_end_date):
+		project_filters["name"] = ["in", project_names]
+
 	projects = frappe.get_all(
 		"Project",
-		filters={
-			"name": ["in", project_names],
-			"status": ["not in", inactive_statuses],
-		},
+		filters=project_filters,
 		fields=["name", "project_name", "status", *optional_fields],
+		limit_start=0,
+		limit_page_length=ANNUAL_ROSTER_RESULT_LIMIT,
+		limit=ANNUAL_ROSTER_RESULT_LIMIT,
 	)
 
-	customer_colors = {}
+	# If a year was supplied, include Projects that overlap the year by their Project
+	# date range. Also keep any referenced projects from Shift Assignment as a safety
+	# fallback even when their Project date fields are blank.
+	if year_start_date and year_end_date:
+		referenced_names = set(project_names)
+		projects = [
+			project
+			for project in projects
+			if _project_overlaps_year(project, year_start_date, year_end_date, start_field, end_field)
+			or project.get("name") in referenced_names
+		]
+
+	customer_details = {}
 	if customer_field:
+		customer_fields = ["name"]
 		customer_color_field = None
+		customer_name_field = None
 		try:
 			customer_meta = frappe.get_meta("Customer")
 			if customer_meta.has_field("customer_color"):
 				customer_color_field = "customer_color"
+			if customer_meta.has_field("customer_name"):
+				customer_name_field = "customer_name"
 		except Exception:
 			customer_color_field = None
+			customer_name_field = None
 
 		if customer_color_field:
-			customer_names = sorted(
-				{project.get(customer_field) for project in projects if project.get(customer_field)}
-			)
-			if customer_names:
-				customer_colors = {
-					customer.name: customer.get(customer_color_field)
-					for customer in frappe.get_all(
-						"Customer",
-						filters={"name": ["in", customer_names]},
-						fields=["name", customer_color_field],
-					)
-				}
+			customer_fields.append(customer_color_field)
+		if customer_name_field:
+			customer_fields.append(customer_name_field)
+
+		customer_names = sorted(
+			{project.get(customer_field) for project in projects if project.get(customer_field)}
+		)
+		if customer_names:
+			customer_details = {
+				customer.name: customer
+				for customer in frappe.get_all(
+					"Customer",
+					filters={"name": ["in", customer_names]},
+					fields=customer_fields,
+					limit_start=0,
+					limit_page_length=ANNUAL_ROSTER_RESULT_LIMIT,
+					limit=ANNUAL_ROSTER_RESULT_LIMIT,
+				)
+			}
 
 	for project in projects:
+		customer = project.get(customer_field) if customer_field else None
+		customer_detail = customer_details.get(customer) if customer else None
+
 		# If no PO field exists on this site yet, default to entered so the annual
 		# bar uses the same visual style as the current monthly project timeline.
 		project["po_entered"] = True if not po_field else _truthy_project_value(project.get(po_field))
 		project["ds_requested"] = _safe_int(project.get(ds_field)) if ds_field else 0
 		project["ns_requested"] = _safe_int(project.get(ns_field)) if ns_field else 0
-		project["customer_color"] = (
-			customer_colors.get(project.get(customer_field)) if customer_field else None
+		project["customer"] = customer
+		project["customer_name"] = (
+			customer_detail.get("customer_name") if customer_detail and customer_detail.get("customer_name") else customer
 		)
+		project["customer_color"] = (
+			customer_detail.get("customer_color") if customer_detail else None
+		)
+		project["_start_field"] = start_field
+		project["_end_field"] = end_field
 
 	return {project.name: project for project in projects}
 
 
-def get_year_project_rows(shift_rows: list[dict], year_start: str, year_end: str) -> list[dict]:
-	projects = {}
-	year_start_date = getdate(year_start)
-	year_end_date = getdate(year_end)
-
-	active_projects = get_active_project_meta(
-		{shift.get("custom_project") for shift in shift_rows if shift.get("custom_project")}
-	)
-
+def get_shift_project_bounds(shift_rows: list[dict], year_start_date, year_end_date) -> dict[str, dict]:
+	bounds: dict[str, dict] = {}
 	for shift in shift_rows:
 		project = shift.get("custom_project")
-
-		# Only show active/open linked projects in the annual Projects / Planning table.
-		# Skip unallocated rows and projects that are completed/cancelled/closed/etc.
-		if not project or project not in active_projects:
+		if not project:
 			continue
 
-		project_meta = active_projects[project]
-		project_name = (
-			project_meta.get("project_name")
-			or shift.get("custom_project_name")
-			or project
-		)
+		start_date = max(getdate(shift.get("start_date")), year_start_date)
+		end_date = getdate(shift.get("end_date")) if shift.get("end_date") else year_end_date
+		end_date = min(end_date, year_end_date)
 
-		if project not in projects:
-			projects[project] = {
-				"project": project,
-				"project_name": project_name,
-				"status": project_meta.get("status"),
-				"po_entered": project_meta.get("po_entered"),
-				"ds_requested": _safe_int(project_meta.get("ds_requested")),
-				"ns_requested": _safe_int(project_meta.get("ns_requested")),
-				"customer_color": project_meta.get("customer_color"),
-				"assignments": {},
-			}
+		if start_date > year_end_date or end_date < year_start_date:
+			continue
+
+		current = bounds.setdefault(project, {"start": start_date, "end": end_date})
+		if start_date < current["start"]:
+			current["start"] = start_date
+		if end_date > current["end"]:
+			current["end"] = end_date
+
+	return bounds
+
+
+def get_year_project_rows(shift_rows: list[dict], year_start: str, year_end: str) -> list[dict]:
+	projects = {}
+	shift_summaries: dict[str, dict] = {}
+	year_start_date = getdate(year_start)
+	year_end_date = getdate(year_end)
+	shift_project_bounds = get_shift_project_bounds(shift_rows, year_start_date, year_end_date)
+
+	active_projects = get_active_project_meta(
+		{shift.get("custom_project") for shift in shift_rows if shift.get("custom_project")},
+		year_start,
+		year_end,
+	)
+
+	# First summarise roster allocations by project/day. This lets the project hover
+	# and future project span details still know about employees/shift types when
+	# shifts exist, without requiring shifts to exist before the project is shown.
+	for shift in shift_rows:
+		project = shift.get("custom_project")
+		if not project or project not in active_projects:
+			continue
 
 		start_date = max(getdate(shift.get("start_date")), year_start_date)
 		end_date = getdate(shift.get("end_date")) if shift.get("end_date") else year_end_date
@@ -563,7 +702,7 @@ def get_year_project_rows(shift_rows: list[dict], year_start: str, year_end: str
 		current = start_date
 		while current <= end_date:
 			date_key = str(current)
-			cell = projects[project]["assignments"].setdefault(
+			cell = shift_summaries.setdefault(project, {}).setdefault(
 				date_key,
 				{
 					"count": 0,
@@ -581,6 +720,54 @@ def get_year_project_rows(shift_rows: list[dict], year_start: str, year_end: str
 				cell["_employees"].append(shift.get("employee"))
 			current = getdate(add_days(current, 1))
 
+	for project, project_meta in active_projects.items():
+		project_name = project_meta.get("project_name") or project
+		bounds = _project_bounds_for_year(
+			project_meta,
+			year_start_date,
+			year_end_date,
+			project_meta.get("_start_field"),
+			project_meta.get("_end_field"),
+			shift_project_bounds.get(project),
+		)
+		if not bounds:
+			continue
+
+		projects[project] = {
+			"project": project,
+			"project_name": project_name,
+			"status": project_meta.get("status"),
+			"customer": project_meta.get("customer"),
+			"customer_name": project_meta.get("customer_name"),
+			"po_entered": project_meta.get("po_entered"),
+			"ds_requested": _safe_int(project_meta.get("ds_requested")),
+			"ns_requested": _safe_int(project_meta.get("ns_requested")),
+			"customer_color": project_meta.get("customer_color"),
+			"assignments": {},
+		}
+
+		current = bounds[0]
+		while current <= bounds[1]:
+			date_key = str(current)
+			cell = projects[project]["assignments"].setdefault(
+				date_key,
+				{
+					"count": 0,
+					"color": None,
+					"_shift_types": [],
+					"_employees": [],
+				},
+			)
+
+			shift_cell = shift_summaries.get(project, {}).get(date_key)
+			if shift_cell:
+				cell["count"] += shift_cell.get("count", 0)
+				cell["color"] = shift_cell.get("color") or cell.get("color")
+				cell["_shift_types"].extend(shift_cell.get("_shift_types", []))
+				cell["_employees"].extend(shift_cell.get("_employees", []))
+
+			current = getdate(add_days(current, 1))
+
 	for project in projects.values():
 		for cell in project["assignments"].values():
 			shift_types = sorted(set(cell.pop("_shift_types", [])))
@@ -591,10 +778,12 @@ def get_year_project_rows(shift_rows: list[dict], year_start: str, year_end: str
 			if cell["count"] > 1:
 				cell["label"] = str(cell["count"])
 			else:
-				cell["label"] = shift_types[0] if shift_types else "1"
+				cell["label"] = shift_types[0] if shift_types else ""
 
-	return sorted(projects.values(), key=lambda row: row["project_name"] or "")
-
+	return sorted(
+		projects.values(),
+		key=lambda row: ((row.get("customer_name") or row.get("customer") or ""), row.get("project_name") or ""),
+	)
 
 def group_by_employee(events: list[dict]) -> dict[str, list[dict]]:
 	grouped_events = {}
@@ -609,7 +798,16 @@ def group_by_employee(events: list[dict]) -> dict[str, list[dict]]:
 def get_available_employees(from_date: str, to_date: str, **employee_filters) -> dict:
 	ALLOWED = {"company", "department", "branch", "designation", "status"}
 	ef = {k: v for k, v in (employee_filters or {}).items() if k in ALLOWED and v}
-	all_emp_names = set(frappe.get_all("Employee", filters=ef, pluck="name"))
+	all_emp_names = set(
+		frappe.get_all(
+			"Employee",
+			filters=ef,
+			pluck="name",
+			limit_start=0,
+			limit_page_length=ANNUAL_ROSTER_RESULT_LIMIT,
+			limit=ANNUAL_ROSTER_RESULT_LIMIT,
+		)
+	)
 	if not all_emp_names:
 		return {"employees": []}
 	ShiftAssignment = frappe.qb.DocType("Shift Assignment")
