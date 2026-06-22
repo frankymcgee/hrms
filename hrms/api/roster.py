@@ -534,6 +534,8 @@ def get_active_project_meta(
 	customer_abbreviation_field = _first_existing_project_field(["customer_abbreviation"])
 	customer_field = _first_existing_project_field(["customer"])
 	project_location_field = _first_existing_project_field(["custom_project_location"])
+	project_notes_field = _first_existing_project_field(["notes"])
+	shifts_filled_field = _first_existing_project_field(["shifts_filled"])
 	start_field = _project_date_field([
 		"expected_start_date",
 		"custom_expected_start_date",
@@ -560,6 +562,8 @@ def get_active_project_meta(
 			customer_abbreviation_field,
 			customer_field,
 			project_location_field,
+			project_notes_field,
+			shifts_filled_field,
 			start_field,
 			end_field,
 		]
@@ -648,6 +652,10 @@ def get_active_project_meta(
 			customer_detail.get("customer_color") if customer_detail else None
 		)
 		project["custom_project_location"] = project.get(project_location_field) if project_location_field else None
+		project["notes"] = project.get(project_notes_field) if project_notes_field else None
+		project["shifts_filled"] = (
+			_truthy_project_value(project.get(shifts_filled_field)) if shifts_filled_field else None
+		)
 		project["_start_field"] = start_field
 		project["_end_field"] = end_field
 
@@ -743,6 +751,8 @@ def get_year_project_rows(shift_rows: list[dict], year_start: str, year_end: str
 			"customer": project_meta.get("customer"),
 			"customer_name": project_meta.get("customer_name"),
 			"custom_project_location": project_meta.get("custom_project_location"),
+			"notes": project_meta.get("notes"),
+			"shifts_filled": project_meta.get("shifts_filled"),
 			"po_entered": project_meta.get("po_entered"),
 			"ds_requested": _safe_int(project_meta.get("ds_requested")),
 			"ns_requested": _safe_int(project_meta.get("ns_requested")),

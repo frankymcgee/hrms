@@ -102,6 +102,7 @@
         :employees="availableEmployees"
         :employeeFilters="employeeFilters"
         :shiftFilters="shiftFilters"
+        :projectFilters="projectFilters"
         :maxHeightPx="tableHeight"
         @hscroll="hScroll = $event"
       />

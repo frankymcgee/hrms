@@ -39,7 +39,7 @@
                     </div>
 
                     <button
-                      v-if="projectLanes.length"
+                      v-if="allProjectRows.length"
                       type="button"
                       class="year-section-toggle year-section-inline-toggle"
                       :class="projectCollapsed && 'year-section-toggle-inactive'"
@@ -48,6 +48,28 @@
                       <span class="year-section-toggle-icon">{{ projectCollapsed ? '▸' : '▾' }}</span>
                       <span>{{ projectCollapsed ? 'Show' : 'Hide' }}</span>
                     </button>
+                  </div>
+
+                  <div class="year-project-filter-row mt-1">
+                    <span>Show All</span>
+                    <div class="year-project-filter-toggle" role="group" aria-label="Show all annual projects">
+                      <button
+                        type="button"
+                        class="year-project-filter-option"
+                        :class="!showAllProjects && 'year-project-filter-option-active'"
+                        @click.stop="showAllProjects = false"
+                      >
+                        No
+                      </button>
+                      <button
+                        type="button"
+                        class="year-project-filter-option"
+                        :class="showAllProjects && 'year-project-filter-option-active'"
+                        @click.stop="showAllProjects = true"
+                      >
+                        Yes
+                      </button>
+                    </div>
                   </div>
 
                   <div class="mt-1 text-[10px] font-semibold leading-none text-gray-600">Legend</div>
@@ -100,6 +122,27 @@
           </thead>
 
           <tbody v-show="showProjectBody">
+            <tr v-if="!projectLanes.length" class="year-project-row">
+              <td class="year-left-col border-b border-r bg-white">
+                <div class="px-2 leading-tight">
+                  <div class="truncate text-xs font-semibold text-gray-800">
+                    No projects to show
+                  </div>
+                  <div class="truncate text-[10px] text-gray-500">
+                    {{ projectEmptyStateMessage }}
+                  </div>
+                </div>
+              </td>
+              <td
+                class="year-cell year-project-empty-cell border-b border-r text-left"
+                :colspan="daysOfYear.length"
+              >
+                <div class="px-3 text-[10px] font-medium text-gray-500">
+                  {{ projectEmptyStateMessage }}
+                </div>
+              </td>
+            </tr>
+
             <tr v-for="lane in projectLanes" :key="lane.key" class="year-project-row">
               <td class="year-left-col border-b border-r bg-white">
                 <div class="px-2 leading-tight">
@@ -120,9 +163,9 @@
                 :style="projectSegmentStyle(segment)"
                 :aria-label="segment.title"
                 :colspan="segment.days"
-                @mouseenter="segment.project ? showProjectHover(segment.project, segment, $event) : clearHoverCard()"
+                @mouseenter="segment.project ? showProjectHover(segment.project, segment, $event) : scheduleClearHoverCard()"
                 @mousemove="moveHoverCard"
-                @mouseleave="clearHoverCard"
+                @mouseleave="() => scheduleClearHoverCard()"
               >
                 <div v-if="segment.active" class="year-project-span-content">
                   <span
@@ -278,7 +321,7 @@
                 :aria-label="employeeCellTitle(employee.name, day.date)"
                 @mouseenter="showEmployeeHover(employee, day.date, $event)"
                 @mousemove="moveHoverCard"
-                @mouseleave="clearHoverCard"
+                @mouseleave="() => scheduleClearHoverCard()"
                 @click="openEmployeeCell(employee.name, day.date)"
               >
                 {{ employeeCellLabel(employee.name, day.date) }}
@@ -437,6 +480,8 @@ type ProjectRow = {
   customer?: string | null
   customer_name?: string | null
   custom_project_location?: string | null
+  notes?: string | null
+  shifts_filled?: boolean | number | string | null
   po_entered?: boolean
   ds_requested?: number
   ns_requested?: number
@@ -458,6 +503,7 @@ const props = defineProps<{
   employees: Employee[]
   employeeFilters: { [K in keyof EmployeeFilters]?: string }
   shiftFilters: { [K in keyof ShiftFilters]?: string }
+  projectFilters?: { company?: string; shifts_filled?: 0 | 1 }
   maxHeightPx?: number
 }>()
 
@@ -465,6 +511,7 @@ const loading = ref(true)
 const employeeSearch = ref<{ value: string; label: string }[]>([])
 const projectCollapsed = ref(false)
 const employeeCollapsed = ref(false)
+const showAllProjects = ref(false)
 const shiftAssignment = ref<string>('')
 const showShiftAssignmentDialog = ref(false)
 const selectedCell = ref<{ employee: string; date: string }>({ employee: '', date: '' })
@@ -493,6 +540,8 @@ const hoverCardElement = ref<HTMLDivElement | null>(null)
 
 let hoverPositionFrame = 0
 let pendingHoverEvent: MouseEvent | null = null
+let hoverHideTimer: number | null = null
+let activeHoverKey = ''
 
 const LEFT_COLUMN_WIDTH = 300
 const DAY_COLUMN_WIDTH = 28
@@ -613,9 +662,48 @@ const visibleEmployees = computed(() => {
   return sortedEmployees.value.filter((employee) => selected.has(employee.name))
 })
 
-const projectRows = computed(() => {
+const allProjectRows = computed(() => {
   return (events.data?.projectRows || []) as ProjectRow[]
 })
+
+const projectRows = computed(() => {
+  if (showAllProjects.value) return allProjectRows.value
+  return allProjectRows.value.filter((project) => !projectIsFilled(project))
+})
+
+const projectEmptyStateMessage = computed(() => {
+  if (!allProjectRows.value.length) return 'No active projects found for this year'
+  if (showAllProjects.value) return 'No projects match the current annual filters'
+  return 'All project shifts are currently filled. Set Show All to Yes to view filled projects.'
+})
+
+function projectRequestedCount(project: ProjectRow) {
+  return Math.max(0, Number(project.ds_requested || 0) + Number(project.ns_requested || 0))
+}
+
+function projectShiftsFilledValue(value: ProjectRow['shifts_filled']) {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value === 'string') {
+    return !['0', 'no', 'false', 'none'].includes(value.trim().toLowerCase())
+  }
+  return Boolean(value)
+}
+
+function projectIsFilled(project: ProjectRow) {
+  // Prefer the Project checkbox field from ERPNext. This matches the monthly
+  // roster behaviour and avoids trying to infer filled status from allocations.
+  const explicitFilled = projectShiftsFilledValue(project.shifts_filled)
+  if (explicitFilled !== null) return explicitFilled
+
+  // Fallback only for older data/API responses that do not yet return the field.
+  const requested = projectRequestedCount(project)
+  if (requested <= 0) return false
+
+  const cells = Object.values(project.assignments || {})
+  if (!cells.length) return false
+
+  return cells.every((cell) => Number(cell?.count || 0) >= requested)
+}
 
 type ProjectLane = {
   key: string
@@ -899,9 +987,9 @@ function projectLaneSegments(lane: ProjectLane): ProjectSegment[] {
   return segments
 }
 
-const showProjectsPanel = computed(() => projectLanes.value.length > 0)
+const showProjectsPanel = computed(() => allProjectRows.value.length > 0)
 const showEmployeesPanel = computed(() => true)
-const showProjectBody = computed(() => projectLanes.value.length > 0 && !projectCollapsed.value)
+const showProjectBody = computed(() => !projectCollapsed.value)
 const showEmployeeBody = computed(() => !employeeCollapsed.value)
 
 function toggleProjectCollapsed() {
@@ -923,7 +1011,7 @@ function toggleEmployeeCollapsed() {
 }
 
 const sectionGap = 16
-const PROJECT_COLLAPSED_HEIGHT = 74
+const PROJECT_COLLAPSED_HEIGHT = 98
 const EMPLOYEE_COLLAPSED_HEIGHT = 96
 
 const annualContentHeight = computed(() => {
@@ -939,9 +1027,10 @@ const projectTableMaxHeight = computed(() => {
     return Math.max(220, annualContentHeight.value - EMPLOYEE_COLLAPSED_HEIGHT - sectionGap)
   }
 
-  const headerHeight = 52
+  const headerHeight = 98
   const rowHeight = 30
-  const naturalHeight = headerHeight + projectLanes.value.length * rowHeight
+  const visibleProjectRowCount = Math.max(1, projectLanes.value.length)
+  const naturalHeight = headerHeight + visibleProjectRowCount * rowHeight
   return Math.min(240, Math.max(112, naturalHeight))
 })
 
@@ -1293,6 +1382,34 @@ function scheduleHoverCardPosition(event: MouseEvent) {
   })
 }
 
+function cancelScheduledHoverClear() {
+  if (hoverHideTimer !== null) {
+    window.clearTimeout(hoverHideTimer)
+    hoverHideTimer = null
+  }
+}
+
+function setHoverCard(key: string, card: HoverCard, event: MouseEvent) {
+  cancelScheduledHoverClear()
+
+  if (activeHoverKey === key && hoverCard.value) {
+    scheduleHoverCardPosition(event)
+    return
+  }
+
+  activeHoverKey = key
+  hoverCard.value = card
+
+  // If the card is already mounted, move it immediately. Otherwise wait for Vue
+  // to mount the card, then position it once. Mouse movement after that uses the
+  // rAF/direct-transform path and does not re-render the card.
+  if (hoverCardElement.value) {
+    scheduleHoverCardPosition(event)
+  } else {
+    nextTick(() => scheduleHoverCardPosition(event))
+  }
+}
+
 function positionHoverCard(event: MouseEvent) {
   scheduleHoverCardPosition(event)
 }
@@ -1301,11 +1418,22 @@ function moveHoverCard(event: MouseEvent) {
   scheduleHoverCardPosition(event)
 }
 
+function scheduleClearHoverCard(delay = 45) {
+  cancelScheduledHoverClear()
+  hoverHideTimer = window.setTimeout(() => {
+    clearHoverCard()
+  }, delay)
+}
+
 function clearHoverCard() {
+  cancelScheduledHoverClear()
+
   if (hoverPositionFrame) {
     window.cancelAnimationFrame(hoverPositionFrame)
     hoverPositionFrame = 0
   }
+
+  activeHoverKey = ''
   pendingHoverEvent = null
   hoverCard.value = null
 }
@@ -1326,7 +1454,7 @@ function shiftTimeRange(shift: ShiftAssignment) {
 function showEmployeeHover(employee: Employee, date: string, event: MouseEvent) {
   const cell = getEmployeeCell(employee.name, date)
   if (cell?.type !== 'shift') {
-    clearHoverCard()
+    scheduleClearHoverCard()
     return
   }
 
@@ -1335,36 +1463,37 @@ function showEmployeeHover(employee: Employee, date: string, event: MouseEvent) 
   const accent = hasNote(shift.note) ? (colors as any).red[500] : color[500] || color[400]
   const customerLabel = shift.customer_abbreviation?.trim() || ''
 
-  hoverCard.value = {
-    type: 'shift',
-    kicker: 'Shift Allocation',
-    title: customerLabel || shift.shift_type,
-    subtitle: [shift.custom_project_name, shift.shift_location].filter(Boolean).join(' · '),
-    badge: cell.shifts.length > 1 ? `${cell.shifts.length} shifts` : shift.status,
-    badgeTone: hasNote(shift.note) ? 'red' : 'blue',
-    accent,
-    rows: [
-      { label: 'Employee', value: employeeDisplayName(employee) },
-      { label: 'Employee ID', value: employee.name },
-      { label: 'Customer', value: customerLabel },
-      { label: 'Project', value: shift.custom_project_name },
-      { label: 'Shift Type', value: shift.shift_type },
-      { label: 'Time', value: shiftTimeRange(shift) },
-      { label: 'Date', value: dayjs(date).format('dddd, DD MMM YYYY') },
-      { label: 'Range', value: compactDateRange(shift.start_date, shift.end_date) },
-      { label: 'Location', value: shift.shift_location },
-      { label: 'Status', value: shift.status },
-    ],
-    note: shift.note?.trim() || '',
-  }
-
-  positionHoverCard(event)
-  nextTick(() => positionHoverCard(event))
+  setHoverCard(
+    `shift:${employee.name}:${shift.name}`,
+    {
+      type: 'shift',
+      kicker: 'Shift Allocation',
+      title: customerLabel || shift.shift_type,
+      subtitle: [shift.custom_project_name, shift.shift_location].filter(Boolean).join(' · '),
+      badge: cell.shifts.length > 1 ? `${cell.shifts.length} shifts` : shift.status,
+      badgeTone: hasNote(shift.note) ? 'red' : 'blue',
+      accent,
+      rows: [
+        { label: 'Employee', value: employeeDisplayName(employee) },
+        { label: 'Employee ID', value: employee.name },
+        { label: 'Customer', value: customerLabel },
+        { label: 'Project', value: shift.custom_project_name },
+        { label: 'Shift Type', value: shift.shift_type },
+        { label: 'Time', value: shiftTimeRange(shift) },
+        { label: 'Date', value: dayjs(date).format('dddd, DD MMM YYYY') },
+        { label: 'Range', value: compactDateRange(shift.start_date, shift.end_date) },
+        { label: 'Location', value: shift.shift_location },
+        { label: 'Status', value: shift.status },
+      ],
+      note: shift.note?.trim() || '',
+    },
+    event,
+  )
 }
 
 function showProjectHover(project: ProjectRow, segment: ProjectSegment, event: MouseEvent) {
   if (!segment.active) {
-    clearHoverCard()
+    scheduleClearHoverCard()
     return
   }
 
@@ -1372,27 +1501,30 @@ function showProjectHover(project: ProjectRow, segment: ProjectSegment, event: M
   const fallbackColor = palette(segment.poEntered === false ? 'red' : 'green')
   const accent = customerColor ? darkenHexColor(customerColor, 0.3) : fallbackColor[500]
 
-  hoverCard.value = {
-    type: 'project',
-    kicker: 'Project',
-    title: segment.label || project.project_name,
-    subtitle: [projectGroupLabel(project), segment.subline].filter(Boolean).join(' · '),
-    badge: segment.poEntered ? 'PO Entered' : 'PO Missing',
-    badgeTone: segment.poEntered ? 'green' : 'red',
-    accent,
-    rows: [
-      { label: 'Project ID', value: project.project },
-      { label: 'Customer', value: project.customer_name || project.customer },
-      { label: 'Location', value: project.custom_project_location },
-      { label: 'Status', value: project.status },
-      { label: 'Date Range', value: segment.subline },
-      { label: 'DS Requested', value: segment.dsRequested || 0 },
-      { label: 'NS Requested', value: segment.nsRequested || 0 },
-    ],
-  }
-
-  positionHoverCard(event)
-  nextTick(() => positionHoverCard(event))
+  setHoverCard(
+    `project:${projectKey(project)}:${segment.date || ''}:${segment.days}`,
+    {
+      type: 'project',
+      kicker: 'Project',
+      title: segment.label || project.project_name,
+      subtitle: [projectGroupLabel(project), segment.subline].filter(Boolean).join(' · '),
+      badge: segment.poEntered ? 'PO Entered' : 'PO Missing',
+      badgeTone: segment.poEntered ? 'green' : 'red',
+      accent,
+      rows: [
+        { label: 'Project ID', value: project.project },
+        { label: 'Customer', value: project.customer_name || project.customer },
+        { label: 'Location', value: project.custom_project_location },
+        { label: 'Status', value: project.status },
+        { label: 'Shifts Filled', value: projectShiftsFilledValue(project.shifts_filled) === true ? 'Yes' : 'No' },
+        { label: 'Date Range', value: segment.subline },
+        { label: 'DS Requested', value: segment.dsRequested || 0 },
+        { label: 'NS Requested', value: segment.nsRequested || 0 },
+      ],
+      note: project.notes?.trim() || '',
+    },
+    event,
+  )
 }
 
 function scrollToToday() {
@@ -1591,6 +1723,10 @@ defineExpose({ events, scrollToToday })
   vertical-align: middle;
 }
 
+.year-project-empty-cell {
+  background: rgb(249 250 251);
+}
+
 .year-project-span {
   padding: 2px 8px !important;
   border-width: 1px !important;
@@ -1777,8 +1913,51 @@ defineExpose({ events, scrollToToday })
 }
 
 
+.year-project-filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: rgb(75 85 99);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.year-project-filter-toggle {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid rgb(209 213 219);
+  border-radius: 9999px;
+  background: rgb(249 250 251);
+}
+
+.year-project-filter-option {
+  min-width: 30px;
+  border: 0;
+  background: transparent;
+  padding: 3px 7px;
+  color: rgb(107 114 128);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.year-project-filter-option:hover {
+  background: rgb(243 244 246);
+}
+
+.year-project-filter-option-active {
+  background: rgb(31 41 55);
+  color: white;
+}
+
+.year-project-filter-option-active:hover {
+  background: rgb(31 41 55);
+}
+
 .year-project-legend-header {
-  height: 74px;
+  height: 98px;
   vertical-align: top;
 }
 
